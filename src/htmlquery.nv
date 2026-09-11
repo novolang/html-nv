@@ -1,0 +1,191 @@
+// htmlquery.nv — finding nodes: by tag, by attribute, and by a named
+// subset of CSS.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use htmltree
+
+// TWO SURFACES, AND THE SMALL ONE IS NOT A CONVENIENCE.  `by_tag`,
+// `by_id`, `by_class` and `by_attr` are what almost every caller
+// actually wants, they cost no parsing, and they cannot be
+// misspelled into something that silently matches nothing — which a
+// selector string can.  A caller that reaches for a selector for
+// `div` has chosen a parser over a comparison.
+//
+// THE SELECTOR SUBSET IS NAMED, COMPILED, AND ITS REFUSALS ARE
+// ERRORS.  A selector is parsed once into an `HtmlSelector` and then
+// matched many times, so a loop over a thousand nodes parses nothing.
+// What is in:
+//
+//   *                       the universal selector
+//   div                     a type selector
+//   #id  .class             id and class
+//   [attr]                  presence
+//   [attr=v] [attr~=v]      exact, and whitespace-separated-word
+//   [attr^=v] [attr$=v]     prefix and suffix
+//   [attr*=v] [attr|=v]     substring, and the hyphen-prefix form
+//   a b                     descendant
+//   a > b                   child
+//   a + b   a ~ b           adjacent and general sibling
+//   a, b                    a group
+//   :first-child :last-child :only-child :empty :root
+//
+// And what is refused, as a named `HtmlSelectorError` rather than a
+// selector that matches nothing:
+//
+//   :nth-child() and its family   they need a counting pass, and the
+//                                 an+b micro-syntax is its own parser
+//   :not() :has() :is() :where()  they nest a selector list inside a
+//                                 selector, which is a different
+//                                 matcher
+//   ::before ::after              pseudo-ELEMENTS describe things
+//                                 that are not in the document at all
+//   :hover :focus :checked        state a document does not have
+//   namespaces — `svg|rect`       this parser lowercases every name
+//
+// A refusal is an error because the alternative is worse: a selector
+// engine that accepted `:nth-child(2n)` and matched nothing would
+// leave a caller debugging their document instead of their selector.
+
+// HtmlSelector is a compiled selector.
+//
+// Opaque: it is a compiled form, and publishing its shape would make
+// every future addition to the subset a breaking change.
+pub struct HtmlSelector
+    // The selector as written, kept for a diagnostic and so that a
+    // caller can print what it compiled.
+    source: Str
+    // The compiled program.  Its encoding is this package's business
+    // and may change within a minor version.
+    program: [Int]
+
+// HtmlSelectorError is why a selector would not compile.
+pub struct HtmlSelectorError
+    // The byte offset in the selector string, so a caller can point at
+    // it.
+    at: Int
+    kind: HtmlSelectorErrorKind
+
+// HtmlSelectorErrorKind names what was wrong.
+pub enum HtmlSelectorErrorKind
+    // A character that cannot appear here.
+    SelectorUnexpected(ch: Int)
+    // A `[` with no `]`, a `(` with no `)`, a quote with no close.
+    SelectorUnclosed(opener: Int)
+    // A pseudo-class or pseudo-element that is not in the subset, with
+    // its name.  The refusal a caller most often meets, and the reason
+    // it names what it saw.
+    SelectorUnsupported(name: Str)
+    // An attribute operator that is not one of the seven.
+    SelectorBadOperator(op: Str)
+    // Nothing at all, or a group with an empty member — `"a,,b"`.
+    SelectorEmpty
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, HtmlSelectorError>` requires it: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`, so this impl is
+// what lets `compile` name its own refusal instead of returning
+// `Result<_, Str>`.
+impl Error for HtmlSelectorError
+    fn message(self) -> Str
+        todo("html-nv.htmlquery.HtmlSelectorError.message")
+
+// compile parses a selector once, so that matching it many times
+// parses nothing.
+//
+// ```novo
+// use htmlquery
+//
+// fn main() [io]
+//     match htmlquery.compile("main > .row a[href^=\"/\"]")
+//         Err(e) =>
+//             println("bad selector at " + str.from_int(e.at))
+//         Ok(_)  =>
+//             println("compiled")
+// ```
+pub fn compile(selector: Str) -> Result<HtmlSelector, HtmlSelectorError> []
+    todo("html-nv.htmlquery.compile")
+
+// selector_text is the selector as it was written.
+pub fn selector_text(s: HtmlSelector) -> Str []
+    todo("html-nv.htmlquery.selector_text")
+
+// error_text is a one-line description of a compile failure.
+pub fn error_text(selector: Str, e: HtmlSelectorError) -> Str []
+    todo("html-nv.htmlquery.error_text")
+
+// matches answers whether one node matches a compiled selector.
+//
+// Matching is from the node upwards — the combinators are checked by
+// walking parents and siblings — which is why a selector can be
+// matched against a single node without the tree being walked from the
+// root.
+pub fn matches(doc: htmltree.HtmlDoc, index: Int, s: HtmlSelector) -> Bool []
+    todo("html-nv.htmlquery.matches")
+
+// select is the first node under `from` that matches, in document
+// order.
+//
+// `NO_NODE` when nothing does.
+pub fn select(doc: htmltree.HtmlDoc, from: Int, s: HtmlSelector) -> Int []
+    todo("html-nv.htmlquery.select")
+
+// select_all is every node under `from` that matches, in document
+// order.
+pub fn select_all(doc: htmltree.HtmlDoc, from: Int, s: HtmlSelector) -> [Int] []
+    todo("html-nv.htmlquery.select_all")
+
+// by_tag is every descendant element with a tag name, in document
+// order.
+//
+// The comparison, not the parser.  Costs no compile and cannot be
+// misspelled into something that matches the wrong thing.
+pub fn by_tag(doc: htmltree.HtmlDoc, from: Int, tag: Str) -> [Int] []
+    todo("html-nv.htmlquery.by_tag")
+
+// by_id is the first descendant with an `id` attribute equal to `id`.
+//
+// The FIRST, because a document with two of them is a broken document
+// and returning a list would invite a caller to pretend otherwise.
+// `HtmlIssueKind.IssueDuplicateId` is where the parser already said
+// so.
+pub fn by_id(doc: htmltree.HtmlDoc, from: Int, id: Str) -> Int []
+    todo("html-nv.htmlquery.by_id")
+
+// by_class is every descendant whose `class` attribute holds a class,
+// as a whitespace-separated word.
+//
+// A word and not a substring: `navbar` does not match
+// `class="navbar-brand"`, which is the bug a `str.contains` on the
+// attribute always has.
+pub fn by_class(doc: htmltree.HtmlDoc, from: Int, class: Str) -> [Int] []
+    todo("html-nv.htmlquery.by_class")
+
+// by_attr is every descendant that has an attribute, whatever its
+// value.
+pub fn by_attr(doc: htmltree.HtmlDoc, from: Int, name: Str) -> [Int] []
+    todo("html-nv.htmlquery.by_attr")
+
+// by_attr_value is every descendant whose attribute equals a value
+// exactly.
+pub fn by_attr_value(doc: htmltree.HtmlDoc, from: Int, name: Str, value: Str) -> [Int] []
+    todo("html-nv.htmlquery.by_attr_value")
+
+// closest is the nearest ancestor of `index` that matches, itself
+// included.
+//
+// The question a scraper asks after it has found a piece of text:
+// which row was that in.  `NO_NODE` when no ancestor matches.
+pub fn closest(doc: htmltree.HtmlDoc, index: Int, s: HtmlSelector) -> Int []
+    todo("html-nv.htmlquery.closest")
+
+// walk visits every node under `from` in document order and returns
+// the ones `keep` chose.
+//
+// The generic traversal the six functions above are shortcuts for, so
+// that a caller with a question none of them answers does not have to
+// write the walk.
+pub fn walk(doc: htmltree.HtmlDoc, from: Int, keep: fn(htmltree.HtmlKind) -> Bool) -> [Int] []
+    todo("html-nv.htmlquery.walk")

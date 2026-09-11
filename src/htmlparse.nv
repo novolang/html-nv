@@ -1,0 +1,205 @@
+// htmlparse.nv — HTML5 text into a tolerant tree, and the tokenizer
+// underneath it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use htmltree
+
+// THERE IS NO ERROR TYPE, and that is the HTML5 specification's
+// decision rather than this package's.  The parsing algorithm has no
+// fatal errors: every byte sequence is a document, and what a browser
+// does with `<p><b>a</p>b` is defined rather than undefined.  So
+// `parse` returns an `HtmlDoc` and never a `Result`, and everything
+// that was wrong with the document is in `doc.issues` — named, with a
+// position, so a linter can fail on what it chooses to.
+//
+// THE TOKENIZER IS THE WHOLE SPEC.  All of it: the eighty states, the
+// character reference machine with its 2231 named references, the
+// raw-text and RCDATA states, the script-data escape states, and the
+// bogus-comment and markup-declaration paths.  It is a state machine
+// over bytes with a small state, it is the half that the HTML5
+// tokenizer test suite checks directly, and there is no honest way to
+// implement a subset of it.
+//
+// THE TREE CONSTRUCTION IS A NAMED SUBSET, and naming it is this
+// module's main obligation to a reader.  The full algorithm is
+// twenty-three insertion modes, a stack of open elements, a list of
+// active formatting elements, foster parenting and the adoption agency
+// algorithm — and it exists to make every browser agree about
+// documents nobody meant to write.  What this package implements:
+//
+//   * the void elements, which never nest;
+//   * the raw-text elements — script, style, textarea, title — whose
+//     contents are not markup;
+//   * implied end tags: an open `<p>`, `<li>`, `<dd>`, `<dt>`,
+//     `<option>`, `<td>`, `<th>`, `<tr>`, `<thead>`, `<tbody>` or
+//     `<tfoot>` closes when something that cannot be inside it opens;
+//   * an end tag that matches an ancestor closes everything up to it;
+//   * a stray end tag is dropped and reported;
+//   * anything still open at the end of the document is closed, and
+//     reported;
+//   * the fragment case, for parsing a piece of a document.
+//
+// AND WHAT IT REFUSES, each with what happens instead — every one of
+// them raises `IssueUnsupportedConstruct` rather than being silently
+// approximated:
+//
+//   THE ADOPTION AGENCY ALGORITHM.  `<b>a<i>b</b>c</i>` is misnested
+//   formatting, and the algorithm reconstructs it so that the `<i>`
+//   reopens inside what remains.  Here the `</b>` closes the `<i>` as
+//   well, and both are reported.  A document that needs this is a
+//   document written by hand and never validated.
+//
+//   FOSTER PARENTING.  Content that appears inside a `<table>` but
+//   outside a cell is, per the spec, moved to before the table.  Here
+//   it stays where it was written, as a child of the table.
+//
+//   `<template>` CONTENTS.  The spec gives a template its own
+//   document fragment, invisible to ordinary traversal.  Here a
+//   template's children are ordinary children, which is what a
+//   sanitiser and a scraper both want and what a browser does not do.
+//
+//   FOREIGN CONTENT — SVG and MathML.  Their integration points
+//   change the tokenizer's rules mid-document.  Here an `<svg>` is an
+//   ordinary element with ordinary children, its case-sensitive
+//   attribute names lowercased like everything else.
+//
+// A reader who needs any of those four needs a browser engine, and
+// should be told so by a package's README rather than by a rendering
+// that is subtly wrong.
+
+// HtmlLimits bounds what the parser will do.
+pub struct HtmlLimits
+    // How deeply elements may nest.  A document past it is truncated
+    // rather than recursed into; the pathological input is a file of
+    // 100,000 `<div>`s and it is two lines to write.
+    max_depth: Int
+    // How many nodes the tree may hold.
+    max_nodes: Int
+    // How many attributes one element may carry.
+    max_attributes: Int
+
+// HtmlTokenKind is one thing the tokenizer found.
+//
+// Public, and the tokenizer with it, because the HTML5 tokenizer test
+// suite tests exactly this — a list of tokens for an input — and a
+// package that hid its tokenizer could not run the suite that proves
+// it right.  It is also what a streaming consumer wants: a scraper
+// looking for one tag does not need a tree.
+pub enum HtmlTokenKind
+    TokenDoctype(name: htmltree.HtmlRange)
+    // A start tag, its name lowercased, its attributes, and whether it
+    // closed itself.  Self-closing is honoured on a void element and
+    // on foreign content, and REPORTED AND IGNORED on anything else,
+    // which is what the spec says and what surprises everybody.
+    TokenStartTag(name: htmltree.HtmlRange, attrs: [htmltree.HtmlAttr], self_closing: Bool)
+    TokenEndTag(name: htmltree.HtmlRange)
+    TokenComment(text: htmltree.HtmlRange)
+    // A run of character data.
+    TokenCharacters(text: htmltree.HtmlRange, needs_decoding: Bool)
+    TokenEof
+
+// HtmlToken is a token and where it was.
+pub struct HtmlToken
+    kind: HtmlTokenKind
+    // The byte range the token occupied, for a diagnostic and for a
+    // rewrite in place.
+    span: htmltree.HtmlRange
+
+// HtmlTokenizer is the tokenizer's state.
+//
+// A value, so a caller can hold one.  The state itself is one integer
+// — the spec's state name — plus the offsets of what is being
+// accumulated; it is not the tree, and it is not large.
+pub struct HtmlTokenizer
+    source: Str
+    at: Int
+    // The spec's tokenizer state, as the packed integer the tables
+    // use.  Public as a field rather than an enum of eighty variants,
+    // because nothing outside the implementation should be matching on
+    // it and eighty public variants would be eighty names nobody else
+    // may use.
+    state: Int
+    limits: HtmlLimits
+
+// HtmlTokenStep is a token and the tokenizer that follows it.
+pub struct HtmlTokenStep
+    tokenizer: HtmlTokenizer
+    token: HtmlToken
+
+// default_limits are bounds no real document reaches: 512 deep, a
+// million nodes, 4096 attributes.
+pub fn default_limits() -> HtmlLimits []
+    todo("html-nv.htmlparse.default_limits")
+
+// parse is a whole document into a tree.
+//
+// ```novo
+// use htmlparse
+// use htmltree
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<ul><li>a<li>b</ul>")
+//     println(str.from_int(htmltree.count(doc)))
+// ```
+pub fn parse(source: Str) -> htmltree.HtmlDoc []
+    todo("html-nv.htmlparse.parse")
+
+// parse_with parses with limits of the caller's choosing.
+pub fn parse_with(source: Str, limits: HtmlLimits) -> htmltree.HtmlDoc []
+    todo("html-nv.htmlparse.parse_with")
+
+// parse_fragment parses a piece of a document as if it were inside
+// `context`.
+//
+// The case a sanitiser actually has: a comment body, a README's
+// rendered HTML, a snippet from a form — none of which is a document
+// and all of which are parsed wrongly if treated as one.  The context
+// element decides the tokenizer's starting state, which is why
+// `parse_fragment(s, "textarea")` treats the whole of `s` as text.
+pub fn parse_fragment(source: Str, context: Str) -> htmltree.HtmlDoc []
+    todo("html-nv.htmlparse.parse_fragment")
+
+// tokenizer starts a token walk over a source string.
+//
+// The streaming surface, for a caller that does not want a tree: a
+// scraper looking for one tag, a checker counting elements, or the
+// HTML5 tokenizer test suite.
+pub fn tokenizer(source: Str) -> HtmlTokenizer []
+    todo("html-nv.htmlparse.tokenizer")
+
+// tokenizer_in starts a walk in the state a context element implies.
+//
+// `"script"`, `"style"`, `"textarea"` and `"title"` each start the
+// tokenizer somewhere other than the data state, and a caller
+// tokenizing a fragment out of one of them has to say so or the
+// contents come back as markup.
+pub fn tokenizer_in(source: Str, context: Str) -> HtmlTokenizer []
+    todo("html-nv.htmlparse.tokenizer_in")
+
+// next_token is the next token, or `None` after `TokenEof`.
+//
+// **The load-bearing interface of the parsing half.**  The tokenizer
+// is the part of HTML5 that is fully specified and fully testable, and
+// this is it: bytes in, tokens out, the state as a value, and no tree
+// anywhere.
+pub fn next_token(t: HtmlTokenizer) -> ?HtmlTokenStep []
+    todo("html-nv.htmlparse.next_token")
+
+// token_text is the source text a token's range names.
+pub fn token_text(t: HtmlTokenizer, r: htmltree.HtmlRange) -> Str []
+    todo("html-nv.htmlparse.token_text")
+
+// line_of is the 1-based line a byte offset falls on, for a
+// diagnostic.
+pub fn line_of(doc: htmltree.HtmlDoc, offset: Int) -> Int []
+    todo("html-nv.htmlparse.line_of")
+
+// issue_text is a one-line description of a recovery, for a linter's
+// output.
+//
+// The issue is a value so a caller can match on it; this is here so a
+// caller that only wants to print it does not have to write the
+// twelve-arm match first.
+pub fn issue_text(doc: htmltree.HtmlDoc, issue: htmltree.HtmlIssue) -> Str []
+    todo("html-nv.htmlparse.issue_text")

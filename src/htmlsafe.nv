@@ -1,0 +1,244 @@
+// htmlsafe.nv — escaping, and sanitising, and the reason they are two
+// different functions.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use htmltree
+
+// ESCAPING AND SANITISING ARE NOT THE SAME JOB and a package that
+// offered one function called `clean` would be offering the wrong one
+// to half its callers.
+//
+//   ESCAPING turns text into text-that-renders-as-itself.  It is five
+//   characters, it is total — every input has an escaped form — and it
+//   is what you do to something that was never meant to be markup.
+//
+//   SANITISING takes a document that IS markup and removes what a
+//   publisher must not be allowed to write.  It is a policy, it
+//   necessarily throws things away, and it cannot be done on text: it
+//   needs a tree, because an allow-list over a substring search is not
+//   an allow-list.
+//
+// THE ALLOW-LIST IS A VALUE, not a flag and not a set of options.  A
+// documentation site, a registry rendering READMEs, a comment box and
+// a mail client want four different lists, and the difference between
+// them is data.  `HtmlAllowList` is that data; `allow_readme()` and
+// its siblings are named lists a caller can start from and modify.
+//
+// THE DOGFOOD IS `orbit/website/src/packages.nv`.  The novo-lang
+// registry renders a published README into its own origin, and does it
+// with two functions: `safe_href`, which checks a URL's scheme against
+// an allow-list, and `sanitize_hrefs`, which finds every `href="` in
+// the rendered HTML by substring search and rewrites the value.
+//
+// That is safe today, and it is safe by ACCIDENT OF COMPOSITION
+// rather than by construction: it works only because
+// `markdown.to_html` escapes the whole document before it substitutes
+// inline markup, so no tag a README wrote can survive, and because
+// that renderer emits an `href` from exactly one place.  Change
+// either fact — pass raw HTML through, or add a second place that
+// writes an attribute — and a substring search over rendered HTML is
+// rewriting whatever happens to look like an attribute, including
+// inside a code sample and inside a text node.
+//
+// `sanitize` does the same job on a tree, where "every `a` element's
+// `href` attribute" is a thing you can say rather than a thing you can
+// search for.
+
+// HtmlAttrRule says which attributes an element may keep.
+pub struct HtmlAttrRule
+    // The element this rule is for.  `"*"` for every element.
+    tag: Str
+    // The attribute names kept, lowercased.
+    attrs: [Str]
+    // The attributes whose value is a URL and so must pass
+    // `url_schemes`.  A subset of `attrs`: `href` on an `a`, `src` on
+    // an `img`.  Named separately because a URL attribute that is
+    // merely allowed is the hole this whole module exists to close.
+    url_attrs: [Str]
+
+// HtmlAllowList is a sanitising policy, as data.
+pub struct HtmlAllowList
+    // The element names kept.  Anything else is UNWRAPPED — removed
+    // while its children stay — unless it is in `strip_contents_of`.
+    tags: [Str]
+    attrs: [HtmlAttrRule]
+    // The URL schemes a URL attribute may use, lowercased and without
+    // the colon.  A destination that is not one of them, and is not a
+    // fragment or a site-absolute path, becomes `refused_url`.
+    url_schemes: [Str]
+    // True to allow `#fragment` and `/site/absolute` destinations,
+    // which have no scheme at all.
+    allow_relative_urls: Bool
+    // What a refused URL becomes.  `"#"` is the registry's answer: the
+    // link is visibly inert rather than silently gone, so a reader can
+    // see something was there.
+    refused_url: Str
+    // Elements removed WITH their contents rather than unwrapped.
+    // `script` and `style` have to be here: their contents are raw
+    // text, so unwrapping a `<script>` would leave its code on the
+    // page as prose.
+    strip_contents_of: [Str]
+    // True to keep comments.  False by default: a comment is invisible
+    // to a reader and is where a conditional-comment trick lives.
+    keep_comments: Bool
+    // Added to every `a` element that survives with an external href.
+    // `"nofollow noopener"` is the answer a site serving other
+    // people's links wants, and leaving it to the caller is how it
+    // gets forgotten.
+    link_rel: Str
+
+// allow_none keeps no elements at all.
+//
+// Every tag is unwrapped, so the result is the document's text with
+// its markup gone.  For a plain-text excerpt, or for a field that
+// should never have been markup.
+pub fn allow_none() -> HtmlAllowList []
+    todo("html-nv.htmlsafe.allow_none")
+
+// allow_basic keeps the inline formatting and the paragraph-level
+// elements, and nothing that can load or position anything.
+//
+// `p br em strong code pre blockquote ul ol li h1`-`h6 a hr`, with
+// `href` on `a` and nothing else anywhere. No images, no tables, no
+// `style`, no `class`, no `id`.  The list for a comment box.
+pub fn allow_basic() -> HtmlAllowList []
+    todo("html-nv.htmlsafe.allow_basic")
+
+// allow_readme is `allow_basic` plus what a rendered README needs.
+//
+// Tables, images, `id` on headings so anchors work, and the
+// `language-*` class on a `code` element so a highlighter has
+// something to read.  This is the list the novo-lang registry's
+// package pages need, and it is named after them because that is the
+// dogfood this package was written against.
+pub fn allow_readme() -> HtmlAllowList []
+    todo("html-nv.htmlsafe.allow_readme")
+
+// web_schemes is the four schemes a published document may link to:
+// `http`, `https`, `mailto`, `tel`.
+//
+// Notably NOT `data:`, which is a script vector in an `href`, and not
+// `javascript:`, which is the whole reason this function exists.
+pub fn web_schemes() -> [Str] []
+    todo("html-nv.htmlsafe.web_schemes")
+
+// with_tag is an allow-list with one more element name allowed.
+//
+// The lists are values, so they are modified by making new ones.  A
+// caller adding `<details>` to `allow_readme()` writes one line and
+// does not have to restate the other thirty names.
+pub fn with_tag(allow: HtmlAllowList, tag: Str) -> HtmlAllowList []
+    todo("html-nv.htmlsafe.with_tag")
+
+// without_tag is an allow-list with one element name removed.
+pub fn without_tag(allow: HtmlAllowList, tag: Str) -> HtmlAllowList []
+    todo("html-nv.htmlsafe.without_tag")
+
+// with_attr_rule is an allow-list with one element's attribute rule
+// replaced.
+pub fn with_attr_rule(allow: HtmlAllowList, rule: HtmlAttrRule) -> HtmlAllowList []
+    todo("html-nv.htmlsafe.with_attr_rule")
+
+// sanitize is a tree with everything the policy refuses removed.
+//
+// **The load-bearing interface of the safety half**, and the whole
+// argument for doing this on a tree: "every `a` element's `href`" is a
+// thing this function can say, where a substring search over rendered
+// HTML can only say "every occurrence of `href=\"`" — which also
+// matches one inside a code sample, inside a text node, and inside an
+// attribute of an element the policy was about to remove anyway.
+//
+// A refused element is UNWRAPPED — removed while its children stay —
+// unless it is in `strip_contents_of`.  Unwrapping is what keeps a
+// document readable after a `<font>` goes; stripping is what has to
+// happen to a `<script>`, whose contents are code rather than prose.
+//
+// ```novo
+// use htmlparse
+// use htmlsafe
+// use htmlwrite
+//
+// fn main() [io]
+//     let doc = htmlparse.parse_fragment("<p onclick=\"x()\">hi</p>", "div")
+//     let clean = htmlsafe.sanitize(doc, htmlsafe.allow_readme())
+//     let out = htmlwrite.serialize([], clean, htmlwrite.default_options())
+//     println(str.from_int(list.len(out)))
+// ```
+pub fn sanitize(doc: htmltree.HtmlDoc, allow: HtmlAllowList) -> htmltree.HtmlDoc []
+    todo("html-nv.htmlsafe.sanitize")
+
+// sanitize_removals is what a sanitise WOULD remove, without removing
+// it.
+//
+// For a publisher's preview — "this is what will be dropped from your
+// README" — and for a test that wants to assert on the policy rather
+// than on the output.  A sanitiser that only ever produced a cleaned
+// document would be one nobody could explain to a user whose content
+// disappeared.
+pub fn sanitize_removals(doc: htmltree.HtmlDoc, allow: HtmlAllowList) -> [Int] []
+    todo("html-nv.htmlsafe.sanitize_removals")
+
+// safe_url is a URL if the policy admits it, and `None` if not.
+//
+// The check is on the scheme after trimming leading whitespace and C0
+// controls and after decoding character references — because
+// `java&#09;script:` and `  javascript:` are both `javascript:` to a
+// browser, and a check that compared the raw bytes would pass them
+// both.  That is the check a substring-and-prefix test cannot make,
+// and it is why this is a function rather than a `starts_with`.
+pub fn safe_url(url: Str, allow: HtmlAllowList) -> ?Str []
+    todo("html-nv.htmlsafe.safe_url")
+
+// escape_text appends text with `&`, `<` and `>` escaped.
+//
+// The three that matter in element content.  It appends to the
+// caller's buffer rather than allocating, like everything else in this
+// package that produces bytes.
+pub fn escape_text(out: [u8], text: Str) -> [u8] []
+    todo("html-nv.htmlsafe.escape_text")
+
+// escape_attr appends text with `&`, `<`, `>`, `"` and `'` escaped.
+//
+// The two extra ones are what stop a quote in a value from ending the
+// attribute.  A separate function from `escape_text` rather than a
+// flag, because choosing the wrong one is the bug and a reader of a
+// call site should be able to see which was chosen.
+pub fn escape_attr(out: [u8], text: Str) -> [u8] []
+    todo("html-nv.htmlsafe.escape_attr")
+
+// escape_text_str is `escape_text` into a fresh string.
+pub fn escape_text_str(text: Str) -> Str []
+    todo("html-nv.htmlsafe.escape_text_str")
+
+// escape_attr_str is `escape_attr` into a fresh string.
+pub fn escape_attr_str(text: Str) -> Str []
+    todo("html-nv.htmlsafe.escape_attr_str")
+
+// unescape resolves every character reference in a string.
+//
+// All 2231 named references, plus the decimal and hexadecimal numeric
+// ones, under the HTML5 rules — which include the two that surprise
+// people: a named reference without its semicolon is still resolved in
+// text (`&amp` is an ampersand), and a numeric reference naming a
+// surrogate or a value outside Unicode becomes U+FFFD rather than
+// being dropped.
+//
+// The table is about 40 KB and is this package's own; it is not a
+// Unicode table and does not come from unicode-nv.
+pub fn unescape(text: Str) -> Str []
+    todo("html-nv.htmlsafe.unescape")
+
+// unescape_into appends the resolved text to a caller's buffer.
+pub fn unescape_into(out: [u8], text: Str) -> [u8] []
+    todo("html-nv.htmlsafe.unescape_into")
+
+// named_reference is the codepoints a named character reference
+// stands for.
+//
+// A list because a few of them are two codepoints — `&NotEqualTilde;`
+// is U+2242 U+0338 — which is the detail that makes an entity table a
+// table rather than a map to a character.  `None` for a name that is
+// not one.
+pub fn named_reference(name: Str) -> ?[Int] []
+    todo("html-nv.htmlsafe.named_reference")

@@ -1,0 +1,271 @@
+// htmlquery_tests.nv — the API suite for finding nodes, and for the
+// serialiser's round-trip property.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THE REFUSALS ARE TESTED AS HARD AS THE ACCEPTANCES.  A selector
+// engine that accepted `:nth-child(2n)` and matched nothing would
+// leave a caller debugging their document instead of their selector,
+// so every pseudo-class outside the subset has to come back as a named
+// error with a position.
+
+use std.test
+use std.list
+use htmlparse
+use htmltree
+use htmlquery
+use htmlwrite
+
+fn doc_of(source: Str) -> htmltree.HtmlDoc [io]
+    htmlparse.parse_fragment(source, "div")
+
+fn sel(s: Str) -> htmlquery.HtmlSelector [io]
+    match htmlquery.compile(s)
+        Err(_) =>
+            todo("htmlquery_tests.sel — the selector did not compile")
+        Ok(c)  =>
+            c
+
+@test
+fn test_the_small_surface_needs_no_parser_and_cannot_be_misspelled() [io]
+    let doc = doc_of("<ul id=\"m\"><li class=\"a b\">1</li><li class=\"ab\">2</li></ul>")
+    let r = htmltree.root(doc)
+
+    test.case("by_tag is a comparison, not a parse")
+    test.assert(list.len(htmlquery.by_tag(doc, r, "li")) == 2)
+
+    test.case("by_id is the FIRST, because a document with two is broken")
+    test.assert(htmlquery.by_id(doc, r, "m") != NO_NODE)
+    test.assert(htmlquery.by_id(doc, r, "nope") == NO_NODE)
+
+    test.case("by_class matches a WORD, so `a` does not match `ab`")
+    test.assert(list.len(htmlquery.by_class(doc, r, "a")) == 1)
+    test.assert(list.len(htmlquery.by_class(doc, r, "ab")) == 1)
+
+    test.case("by_attr finds presence, whatever the value")
+    test.assert(list.len(htmlquery.by_attr(doc, r, "class")) == 2)
+    test.assert(list.len(htmlquery.by_attr_value(doc, r, "class", "ab")) == 1)
+
+@test
+fn test_the_selector_subset_matches_what_the_readme_says_it_does() [io]
+    let doc = doc_of("<main><div class=\"row\"><a href=\"/u\">x</a></div><p>y</p></main>")
+    let r = htmltree.root(doc)
+
+    test.case("type, class and id")
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("a"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel(".row"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("*"))) > 3)
+
+    test.case("descendant and child, which are different")
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("main a"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("main > a"))) == 0)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("main > div"))) == 1)
+
+    test.case("the sibling combinators")
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("div + p"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("div ~ p"))) == 1)
+
+    test.case("the seven attribute operators")
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("[href]"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("[href=\"/u\"]"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("[href^=\"/\"]"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("[href$=\"u\"]"))) == 1)
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("[href*=\"/u\"]"))) == 1)
+
+    test.case("a group is a comma")
+    test.assert(list.len(htmlquery.select_all(doc, r, sel("a, p"))) == 2)
+
+@test
+fn test_a_pseudo_class_outside_the_subset_is_an_error_not_an_empty_match() [io]
+    test.case(":nth-child needs a counting pass and an an+b parser")
+    match htmlquery.compile("li:nth-child(2n)")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            match e.kind
+                SelectorUnsupported(name) =>
+                    test.assert(name == "nth-child")
+                _                         =>
+                    test.assert(false)
+
+    test.case(":not() nests a selector list inside a selector")
+    match htmlquery.compile("p:not(.x)")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+    test.case("a pseudo-ELEMENT describes something that is not in the document")
+    match htmlquery.compile("p::before")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+    test.case("and a state a document does not have")
+    match htmlquery.compile("a:hover")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+@test
+fn test_a_malformed_selector_says_where_it_gave_up() [io]
+    test.case("an unclosed bracket")
+    match htmlquery.compile("a[href")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(e.at == 1)
+
+    test.case("an operator that is not one of the seven")
+    match htmlquery.compile("a[href!=\"x\"]")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+    test.case("an empty selector, and an empty member of a group")
+    match htmlquery.compile("")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(e.kind == SelectorEmpty)
+    match htmlquery.compile("a,,b")
+        Ok(_)  =>
+            test.assert(false)
+        Err(_) =>
+            test.assert(true)
+
+@test
+fn test_matching_is_from_the_node_upwards() [io]
+    // Which is why a selector can be matched against a single node
+    // without walking the tree from the root, and why `closest` is one
+    // function rather than a search.
+    let doc = doc_of("<table><tr><td class=\"c\">x</td></tr></table>")
+    let r = htmltree.root(doc)
+    let cell = htmlquery.select(doc, r, sel(".c"))
+
+    test.case("one node against a compiled selector")
+    test.assert(htmlquery.matches(doc, cell, sel("td")))
+    test.assert(htmlquery.matches(doc, cell, sel("tr > td")))
+    test.assert(htmlquery.matches(doc, cell, sel("p")) == false)
+
+    test.case("closest is the question a scraper asks after it finds text")
+    test.assert(htmlquery.closest(doc, cell, sel("tr")) != NO_NODE)
+    test.assert(htmlquery.closest(doc, cell, sel("td")) == cell)
+    test.assert(htmlquery.closest(doc, cell, sel("form")) == NO_NODE)
+
+    test.case("and the selector remembers how it was written, for a diagnostic")
+    test.assert(htmlquery.selector_text(sel("main > .row")) == "main > .row")
+
+@test
+fn test_the_round_trip_is_not_an_identity_and_the_promise_is_narrower() [io]
+    // `serialize(parse(s))` is not `s` and cannot be: the parser
+    // closed what the document left open and lowercased the names.
+    // What IS promised is that the result parses to the same tree —
+    // and that is the property a sanitiser depends on.
+    let source = "<P CLASS=\"x\">a<br>b"
+    let once = doc_of(source)
+    let text = htmlwrite.serialize_str(once, htmlwrite.default_options())
+
+    test.case("the output is not the input")
+    test.assert(text != source)
+
+    test.case("it is normalised — lowercased, and closed")
+    test.assert(str.contains(text, "<p class=\"x\">"))
+    test.assert(str.contains(text, "</p>"))
+
+    test.case("and parsing it again gives a tree with the same node count")
+    let twice = doc_of(text)
+    test.assert(htmltree.count(twice) == htmltree.count(once))
+
+@test
+fn test_serialising_escapes_on_the_way_out_and_raw_text_is_the_exception() [io]
+    test.case("a text node's ampersand comes back escaped")
+    let amp = doc_of("<p>a &amp; b</p>")
+    test.assert(str.contains(htmlwrite.serialize_str(amp,
+                                                     htmlwrite.default_options()),
+                             "&amp;"))
+
+    test.case("an attribute's quote comes back escaped")
+    let q = doc_of("<p title=\"a&quot;b\">x</p>")
+    test.assert(str.contains(htmlwrite.serialize_str(q,
+                                                     htmlwrite.default_options()),
+                             "&quot;"))
+
+    test.case("but a script's contents are emitted verbatim — escaping is code")
+    let s = doc_of("<script>if (a < b) {}</script>")
+    let out = htmlwrite.serialize_str(s, htmlwrite.default_options())
+    test.assert(str.contains(out, "a < b"))
+
+@test
+fn test_serialising_a_fragment_is_a_different_call_from_the_whole_node() [io]
+    let doc = doc_of("<div id=\"x\"><p>a</p></div>")
+    let div = htmlquery.select(doc, htmltree.root(doc), sel("#x"))
+    let o = htmlwrite.default_options()
+
+    test.case("the node and everything under it")
+    let outer = htmlwrite.serialize_str(doc, o)
+    test.assert(str.contains(outer, "<div"))
+
+    test.case("the children but not the node — the innerHTML question")
+    let inner = htmlwrite.serialize_children([], doc, div, o)
+    test.assert(list.len(inner) > 0)
+
+    test.case("no doctype by default, because most callers hold a fragment")
+    test.assert(o.doctype == false)
+    test.assert(o.indent == 0)
+
+    test.case("and the pretty form is for reading, never for publishing")
+    test.assert(htmlwrite.pretty_options().indent == 2)
+
+    test.case("serialize_node is the node and everything under it")
+    let one = htmlwrite.serialize_node([], doc, div, o)
+    test.assert(list.len(one) > 0)
+
+@test
+fn test_a_caller_building_a_page_writes_tags_with_the_same_escape() [io]
+    // A template engine or a site generator emits tags of its own, and
+    // a second implementation of attribute escaping is a second place
+    // to get it wrong.
+    let o = htmlwrite.default_options()
+
+    test.case("a start tag, with its attributes escaped")
+    let out = htmlwrite.write_start_tag([], "a",
+                                        [HtmlWriteAttr { name: "href",
+                                                         value: "/a\"b" }],
+                                                         o)
+    test.assert(list.len(out) > 0)
+
+    test.case("text between them")
+    let out2 = htmlwrite.write_text(out, "a<b")
+    test.assert(list.len(out2) > list.len(out))
+
+    test.case("an end tag")
+    let out3 = htmlwrite.write_end_tag(out2, "a")
+    test.assert(list.len(out3) > list.len(out2))
+
+    test.case("and nothing at all for a void element, which has no end tag")
+    test.assert(list.len(htmlwrite.write_end_tag([], "br")) == 0)
+
+@test
+fn test_a_bad_selector_can_be_printed_and_a_walk_answers_what_no_selector_does() [io]
+    test.case("the compile error renders with the selector and a caret")
+    match htmlquery.compile("a[href")
+        Ok(_)  =>
+            test.assert(false)
+        Err(e) =>
+            test.assert(str.contains(htmlquery.error_text("a[href", e), "a[href"))
+
+    test.case("and walk is the traversal the six shortcuts are written on")
+    let doc = doc_of("<p>a</p><!-- c --><p>b</p>")
+    let comments = htmlquery.walk(doc, htmltree.root(doc), is_comment)
+    test.assert(list.len(comments) == 1)
+
+fn is_comment(k: htmltree.HtmlKind) -> Bool
+    match k
+        HtmlComment(_) =>
+            true
+        _              =>
+            false

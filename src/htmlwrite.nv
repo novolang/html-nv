@@ -1,0 +1,134 @@
+// htmlwrite.nv — a tree back out as HTML, appended to a buffer the
+// caller owns.
+//
+// Every body here is a `todo()`; the signatures are the design.
+
+use htmltree
+
+// NOTHING HERE WRITES.  Every function takes the buffer to append to
+// and returns it — so a caller serialises a hundred fragments into one
+// buffer and writes once, and a test asserts on bytes with no file
+// anywhere.
+//
+// THE ROUND TRIP IS NOT AN IDENTITY, AND SAYING SO IS THE POINT.
+// `serialize(parse(s))` is not `s`, and cannot be: the parser closed
+// what the document left open, dropped what it could not place,
+// lowercased the tag names and resolved the character references.
+// What IS promised is that the result parses to the same tree —
+// `parse(serialize(parse(s)))` has the same nodes as `parse(s)` — and
+// that is the property the suite checks, because it is the one a
+// sanitiser depends on.  A sanitiser whose output re-parsed to
+// something else would be a sanitiser that could be talked out of its
+// own policy.
+//
+// SERIALISING IS WHERE ESCAPING HAPPENS, and it is not optional.  A
+// text node's `&` becomes `&amp;` and an attribute's `"` becomes
+// `&quot;` on the way out, always, because the alternative is a
+// serialiser that can emit a document that does not parse back to
+// itself — which is the same hole as not escaping at all.  The raw
+// text elements are the exception the spec carves out: `<script>` and
+// `<style>` contents are emitted verbatim, because escaping them would
+// change the code.
+
+// HtmlWriteOptions is how the output differs from the plain form.
+pub struct HtmlWriteOptions
+    // Close void elements as `<br />` rather than `<br>`.  Off by
+    // default; on for XHTML, EPUB, or an XML consumer.
+    xhtml: Bool
+    // Emit a `<!DOCTYPE html>` before the document.  Off by default,
+    // because most callers are serialising a FRAGMENT and a doctype
+    // inside one is invalid.
+    doctype: Bool
+    // Emit comments.  On by default here even though `allow_none`
+    // drops them at the sanitising step: serialising is not
+    // sanitising, and a serialiser that silently dropped part of its
+    // input would make the round-trip property untrue.
+    comments: Bool
+    // Indent nested elements by this many spaces, and put each on its
+    // own line.  0 for none, which is the default: indenting changes
+    // what a document MEANS wherever whitespace is significant —
+    // inside a `<pre>`, and between two inline elements — so a
+    // pretty-printer is for reading, never for publishing.
+    indent: Int
+
+// default_options is compact output: no doctype, no indent, comments
+// kept, HTML rather than XHTML syntax.
+pub fn default_options() -> HtmlWriteOptions []
+    todo("html-nv.htmlwrite.default_options")
+
+// pretty_options is `default_options` with two-space indentation.
+//
+// For a diff, a fixture, or a human reading the output of a
+// transform.  Never for publishing: see `indent`.
+pub fn pretty_options() -> HtmlWriteOptions []
+    todo("html-nv.htmlwrite.pretty_options")
+
+// serialize appends a whole document.
+//
+// ```novo
+// use htmlparse
+// use htmlwrite
+//
+// fn main() [io]
+//     let doc = htmlparse.parse_fragment("<p>hi", "div")
+//     let out = htmlwrite.serialize([], doc, htmlwrite.default_options())
+//     println(str.from_int(list.len(out)))   // <p>hi</p> — the parser closed it
+// ```
+pub fn serialize(out: [u8], doc: htmltree.HtmlDoc, options: HtmlWriteOptions) -> [u8] []
+    todo("html-nv.htmlwrite.serialize")
+
+// serialize_node appends one node and everything under it.
+//
+// What a caller that selected a fragment out of a page wants, and what
+// makes "extract this table and put it in an email" one call.
+pub fn serialize_node(out: [u8], doc: htmltree.HtmlDoc, index: Int,
+                      options: HtmlWriteOptions) -> [u8] []
+    todo("html-nv.htmlwrite.serialize_node")
+
+// serialize_children appends a node's children but not the node.
+//
+// The `innerHTML` question, and separate from `serialize_node` because
+// the two differ by exactly the element a caller usually does not
+// want.
+pub fn serialize_children(out: [u8], doc: htmltree.HtmlDoc, index: Int,
+                          options: HtmlWriteOptions) -> [u8] []
+    todo("html-nv.htmlwrite.serialize_children")
+
+// serialize_str is `serialize` into a fresh string.
+//
+// The convenience for a caller with no buffer to reuse.  It
+// allocates, which is the whole difference.
+pub fn serialize_str(doc: htmltree.HtmlDoc, options: HtmlWriteOptions) -> Str []
+    todo("html-nv.htmlwrite.serialize_str")
+
+// write_start_tag appends an element's opening tag, attributes
+// escaped.
+//
+// Public because a caller building a page around this package's output
+// — a template engine, a site generator — needs to emit tags too, and
+// a second implementation of attribute escaping is a second place to
+// get it wrong.
+pub fn write_start_tag(out: [u8], tag: Str, attrs: [HtmlWriteAttr],
+                       options: HtmlWriteOptions) -> [u8] []
+    todo("html-nv.htmlwrite.write_start_tag")
+
+// write_end_tag appends an element's closing tag, or nothing for a
+// void element.
+pub fn write_end_tag(out: [u8], tag: Str) -> [u8] []
+    todo("html-nv.htmlwrite.write_end_tag")
+
+// HtmlWriteAttr is a name and a value for a caller building a tag.
+//
+// Strings rather than the tree's ranges, because a caller writing a
+// tag has strings and has no document for a range to point into.
+pub struct HtmlWriteAttr
+    name: Str
+    value: Str
+
+// write_text appends text with the element-content escapes applied.
+//
+// The same escape `htmlsafe.escape_text` does, here so that a caller
+// already holding a write buffer does not have to reach into the other
+// module for it.
+pub fn write_text(out: [u8], text: Str) -> [u8] []
+    todo("html-nv.htmlwrite.write_text")

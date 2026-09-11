@@ -1,0 +1,261 @@
+// htmlsafe_tests.nv — the API suite for escaping and sanitising.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THE CASES ARE THE ONES A SANITISER IS ACTUALLY ATTACKED WITH, and
+// every one of them is a case the novo-lang registry's current
+// substring-based `sanitize_hrefs` either handles by accident or would
+// not handle at all if the renderer in front of it changed.  A
+// sanitiser suite made of well-formed documents proves nothing.
+
+use std.test
+use std.list
+use htmlparse
+use htmltree
+use htmlsafe
+use htmlwrite
+
+fn clean(source: Str, allow: htmlsafe.HtmlAllowList) -> Str [io]
+    let doc = htmlparse.parse_fragment(source, "div")
+    htmlwrite.serialize_str(htmlsafe.sanitize(doc, allow),
+                            htmlwrite.default_options())
+
+@test
+fn test_escaping_is_five_characters_and_two_functions() [io]
+    // Two functions rather than one with a flag, because choosing the
+    // wrong one is the bug and a reader of a call site should be able
+    // to see which was chosen.
+    test.case("element content escapes three")
+    test.assert(htmlsafe.escape_text_str("a<b>&c") == "a&lt;b&gt;&amp;c")
+
+    test.case("and a quote is left alone there, because it cannot end anything")
+    test.assert(htmlsafe.escape_text_str("say \"hi\"") == "say \"hi\"")
+
+    test.case("an attribute value escapes five")
+    test.assert(htmlsafe.escape_attr_str("a\"b'c") == "a&quot;b&#39;c")
+
+    test.case("escaping is total — every input has an escaped form")
+    test.assert(htmlsafe.escape_text_str("") == "")
+
+@test
+fn test_unescaping_follows_the_html5_rules_including_the_odd_ones() [io]
+    test.case("the named references")
+    test.assert(htmlsafe.unescape("&amp;&lt;&gt;&quot;") == "&<>\"")
+
+    test.case("the numeric ones, decimal and hexadecimal")
+    test.assert(htmlsafe.unescape("&#65;&#x42;") == "AB")
+
+    test.case("a named reference without its semicolon is still resolved in text")
+    test.assert(htmlsafe.unescape("a&amp b") == "a& b")
+
+    test.case("a numeric reference naming a surrogate becomes U+FFFD")
+    test.assert(htmlsafe.unescape("&#xD800;") == "\u{FFFD}")
+
+    test.case("and one outside Unicode does too, rather than being dropped")
+    test.assert(htmlsafe.unescape("&#x110000;") == "\u{FFFD}")
+
+    test.case("a name that is not a reference stays as it was written")
+    test.assert(htmlsafe.unescape("&nosuch;") == "&nosuch;")
+
+    test.case("a few references are two codepoints, which is why the table is a table")
+    match htmlsafe.named_reference("NotEqualTilde")
+        None     =>
+            test.assert(false)
+        Some(cs) =>
+            test.assert(list.len(cs) == 2)
+    test.assert(htmlsafe.named_reference("amp") == Some([0x26]))
+    test.assert(htmlsafe.named_reference("nosuch") == None)
+
+@test
+fn test_a_javascript_url_is_refused_however_it_is_spelled() [io]
+    // THE CHECK A SUBSTRING TEST CANNOT MAKE.  A browser strips
+    // leading whitespace and C0 controls from a URL and decodes
+    // character references before it looks at the scheme, so all four
+    // of these are `javascript:` to a browser and none of them is to a
+    // `starts_with`.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("the plain spelling")
+    test.assert(htmlsafe.safe_url("javascript:alert(1)", allow) == None)
+
+    test.case("with leading whitespace")
+    test.assert(htmlsafe.safe_url("  javascript:alert(1)", allow) == None)
+
+    test.case("with a C0 control inside the scheme")
+    test.assert(htmlsafe.safe_url("java\tscript:alert(1)", allow) == None)
+
+    test.case("with a character reference inside the scheme")
+    test.assert(htmlsafe.safe_url("java&#09;script:alert(1)", allow) == None)
+
+    test.case("in mixed case")
+    test.assert(htmlsafe.safe_url("JaVaScRiPt:alert(1)", allow) == None)
+
+    test.case("and a data: URL is refused too — it is a script vector in an href")
+    test.assert(htmlsafe.safe_url("data:text/html,<script>x</script>", allow) == None)
+
+@test
+fn test_the_four_shapes_a_published_document_may_link_to_survive() [io]
+    // The registry's own allow-list: http, https, mailto, a fragment,
+    // a site-absolute path.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("the schemes")
+    test.assert(htmlsafe.safe_url("https://e.example/x", allow) == Some("https://e.example/x"))
+    test.assert(htmlsafe.safe_url("http://e.example/x", allow) == Some("http://e.example/x"))
+    test.assert(htmlsafe.safe_url("mailto:a@e.example", allow) == Some("mailto:a@e.example"))
+
+    test.case("and the two that have no scheme at all")
+    test.assert(htmlsafe.safe_url("#section", allow) == Some("#section"))
+    test.assert(htmlsafe.safe_url("/docs/a.html", allow) == Some("/docs/a.html"))
+
+    test.case("the scheme list is the four, and data: is not among them")
+    let s = htmlsafe.web_schemes()
+    test.assert(list.len(s) == 4)
+
+@test
+fn test_sanitising_is_a_tree_operation_and_that_is_the_whole_argument() [io]
+    // The registry rewrites `href="` occurrences by searching rendered
+    // HTML.  That is exact only because the renderer in front of it
+    // escapes the whole document first and emits an href from exactly
+    // one place.  On a tree, "every `a` element's `href`" is a thing
+    // you can say.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("an href attribute is rewritten")
+    test.assert(str.contains(clean("<a href=\"javascript:x\">t</a>", allow),
+                             "javascript:") == false)
+    test.assert(str.contains(clean("<a href=\"javascript:x\">t</a>", allow),
+                             "href=\"#\""))
+
+    test.case("and the same characters inside a CODE SAMPLE are left alone")
+    let sample = clean("<code>href=\"javascript:x\"</code>", allow)
+    test.assert(str.contains(sample, "javascript:x"))
+
+    test.case("as is the same text in an ordinary text node")
+    let prose = clean("<p>write href=\"javascript:x\" to break it</p>", allow)
+    test.assert(str.contains(prose, "javascript:x"))
+
+@test
+fn test_a_refused_element_is_unwrapped_and_a_script_is_stripped() [io]
+    // Unwrapping keeps the document readable after a `<font>` goes.
+    // A `<script>` cannot be unwrapped: its contents are raw text, so
+    // unwrapping would leave the code on the page as prose.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("an element not on the list goes, and its children stay")
+    let out = clean("<font size=\"7\">hello</font>", allow)
+    test.assert(str.contains(out, "hello"))
+    test.assert(str.contains(out, "<font") == false)
+
+    test.case("a script goes with its contents")
+    let script = clean("<p>a</p><script>alert(1)</script>", allow)
+    test.assert(str.contains(script, "alert") == false)
+    test.assert(str.contains(script, "a"))
+
+    test.case("and so does a style, for the same reason")
+    let style = clean("<style>p{color:red}</style>x", allow)
+    test.assert(str.contains(style, "color") == false)
+
+@test
+fn test_an_event_handler_attribute_never_survives() [io]
+    // The other half of the script problem, and the one a scheme
+    // allow-list does not touch at all.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("onclick goes")
+    test.assert(str.contains(clean("<p onclick=\"x()\">a</p>", allow),
+                             "onclick") == false)
+
+    test.case("onerror on an image goes")
+    test.assert(str.contains(clean("<img src=\"/a.png\" onerror=\"x()\">", allow),
+                             "onerror") == false)
+
+    test.case("a style attribute goes, because it can position and can load")
+    test.assert(str.contains(clean("<p style=\"position:fixed\">a</p>", allow),
+                             "style") == false)
+
+    test.case("but the element and the attributes the policy allows stay")
+    let img = clean("<img src=\"/a.png\" alt=\"t\">", allow)
+    test.assert(str.contains(img, "/a.png"))
+    test.assert(str.contains(img, "alt=\"t\""))
+
+@test
+fn test_the_allow_lists_are_values_a_caller_modifies() [io]
+    // Four callers want four lists and the difference between them is
+    // data, not flags.
+    test.case("allow_none keeps no elements — the document's text, with markup gone")
+    let none = clean("<p><em>a</em></p>", htmlsafe.allow_none())
+    test.assert(str.contains(none, "<p") == false)
+    test.assert(str.contains(none, "a"))
+
+    test.case("allow_basic keeps the inline formatting and no images")
+    let basic = htmlsafe.allow_basic()
+    test.assert(str.contains(clean("<em>a</em>", basic), "<em>"))
+    test.assert(str.contains(clean("<img src=\"/a.png\">", basic), "<img") == false)
+
+    test.case("allow_readme adds what a rendered README needs")
+    let readme = htmlsafe.allow_readme()
+    test.assert(str.contains(clean("<img src=\"/a.png\">", readme), "<img"))
+    test.assert(str.contains(clean("<table><tr><td>a</td></tr></table>", readme),
+                             "<table"))
+
+    test.case("and a caller adds one element with one line")
+    let plus = htmlsafe.with_tag(basic, "details")
+    test.assert(str.contains(clean("<details>a</details>", plus), "<details"))
+    test.assert(str.contains(clean("<details>a</details>", basic), "<details") == false)
+
+    test.case("removes one the same way")
+    let minus = htmlsafe.without_tag(readme, "img")
+    test.assert(str.contains(clean("<img src=\"/a.png\">", minus), "<img") == false)
+
+    test.case("and replaces one element's attribute rule without restating the rest")
+    let rule = HtmlAttrRule { tag: "a", attrs: ["href", "title"],
+                              url_attrs: ["href"] }
+    let titled = htmlsafe.with_attr_rule(readme, rule)
+    test.assert(str.contains(clean("<a href=\"/u\" title=\"t\">x</a>", titled),
+                             "title=\"t\""))
+    test.assert(str.contains(clean("<a href=\"/u\" title=\"t\">x</a>", readme),
+                             "title=\"t\"") == false)
+
+@test
+fn test_the_appending_forms_are_what_a_page_builder_uses() [io]
+    // Every function here that produces bytes appends to the caller's
+    // buffer, so a page is assembled in one allocation rather than one
+    // per fragment.
+    test.case("the escapes append")
+    let out = htmlsafe.escape_text([], "a<b")
+    test.assert(list.len(out) == 7)
+    let out2 = htmlsafe.escape_attr(out, "\"")
+    test.assert(list.len(out2) == 13)
+
+    test.case("and so does the unescape")
+    let back = htmlsafe.unescape_into([], "&amp;")
+    test.assert(list.len(back) == 1)
+
+@test
+fn test_a_sanitiser_can_say_what_it_would_remove_before_it_removes_it() [io]
+    // For a publisher's preview.  A sanitiser that only produced a
+    // cleaned document is one nobody could explain to a user whose
+    // content disappeared.
+    let doc = htmlparse.parse_fragment("<p onclick=\"x\">a</p><script>y</script>",
+                                       "div")
+
+    test.case("the removals are reported as node indices")
+    let removals = htmlsafe.sanitize_removals(doc, htmlsafe.allow_readme())
+    test.assert(list.len(removals) > 0)
+
+    test.case("and asking does not change the document")
+    test.assert(htmltree.count(doc) > 0)
+
+@test
+fn test_an_external_link_gets_the_rel_a_site_serving_other_people_s_links_wants() [io]
+    // Leaving it to the caller is how it gets forgotten.
+    let allow = htmlsafe.allow_readme()
+
+    test.case("an external link carries the rel")
+    test.assert(str.contains(clean("<a href=\"https://e.example/\">t</a>", allow),
+                             "nofollow"))
+
+    test.case("and a same-site one does not need it")
+    test.assert(str.contains(clean("<a href=\"/docs/a.html\">t</a>", allow),
+                             "nofollow") == false)

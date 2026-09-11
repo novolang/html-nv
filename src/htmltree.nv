@@ -1,0 +1,214 @@
+// htmltree.nv — the document, as a flat arena of nodes over the
+// caller's source.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SHAPE IS THE SAME ONE markdown-nv's TREE HAS, on purpose: nodes
+// in one list, referring to each other by index, with `parent`,
+// `first_child`, `next_sibling` and `previous_sibling` on every one.
+// One allocation for the tree rather than one per node, an index that
+// is stable and comparable, and a traversal that is an index walk.
+//
+// TEXT IS A RANGE INTO THE SOURCE, with one exception, and the
+// exception is the same one markdown-nv has: `&amp;` is not a
+// substring of the document.  Here it is handled differently, because
+// HTML has 2231 named character references and a text node can hold
+// dozens — so a text node carries a range AND a flag saying whether
+// the range needs decoding, and `text_of` decodes when it has to.  A
+// caller that only wants to know where the text is never pays for it.
+//
+// AN ELEMENT'S NAME AND ATTRIBUTES ARE ALSO RANGES, and they are
+// already lowercased by the tokenizer: HTML5 defines tag and attribute
+// name matching as ASCII case-insensitive, deliberately and not as a
+// Unicode question, so `DIV` and `div` are the same element and no
+// Unicode table is involved.  That is why this package does not depend
+// on unicode-nv.
+
+// The index that means "there is no node here".
+pub const NO_NODE = 0 - 1
+
+// HtmlRange is a byte range into the source the caller holds.
+pub struct HtmlRange
+    start: Int
+    end: Int
+
+// HtmlAttr is one attribute of an element.
+pub struct HtmlAttr
+    // The name, lowercased by the tokenizer.  A range, so the common
+    // case — comparing it with a literal — costs no allocation.
+    name: HtmlRange
+    // The value as written.  Empty for a valueless attribute, which is
+    // not the same as absent: `<input disabled>` has the attribute
+    // with an empty value.
+    value: HtmlRange
+    // True when the value holds a character reference and so is not
+    // the text it appears to be.
+    needs_decoding: Bool
+
+// HtmlKind is what a node is.
+pub enum HtmlKind
+    // The document root.  Exactly one, at index 0.
+    HtmlDocument
+    // An element, its tag name lowercased, and its attributes in
+    // source order.  Duplicates are kept in the order they were
+    // written and the FIRST wins, which is what the HTML5 parsing
+    // algorithm does; a caller that wants to know a duplicate existed
+    // can see it.
+    HtmlElement(tag: HtmlRange, attrs: [HtmlAttr])
+    // Character data.
+    HtmlText(text: HtmlRange, needs_decoding: Bool)
+    // A comment's contents, without the `<!--` and `-->`.
+    HtmlComment(text: HtmlRange)
+    // A doctype and the name it declared.
+    HtmlDoctype(name: HtmlRange)
+
+// HtmlNode is one node in the arena.
+pub struct HtmlNode
+    kind: HtmlKind
+    parent: Int
+    first_child: Int
+    last_child: Int
+    next_sibling: Int
+    previous_sibling: Int
+    // The byte range of the whole node in the source, open tag and
+    // close tag included.  What a tool that has to REPLACE a node in
+    // the original document needs — which is what a sanitiser that
+    // wants to rewrite in place, rather than re-serialise, is.
+    span: HtmlRange
+
+// HtmlDoc is a parsed document: the arena, the source, and what the
+// parser had to recover from.
+pub struct HtmlDoc
+    // The source the ranges point into.  Held here because a range
+    // without its string is meaningless.
+    source: Str
+    nodes: [HtmlNode]
+    // Every place the document was not well-formed and the parser
+    // recovered.  Never fatal — see `htmlparse` for why there is no
+    // error type — but a validator, a linter or a CI check wants them,
+    // and a parser that recovered silently would be a parser nobody
+    // could debug.
+    issues: [HtmlIssue]
+    // True when an `HtmlLimits` bound was reached and the rest of the
+    // document was not parsed.
+    truncated: Bool
+
+// HtmlIssue is one recovery the parser made.
+pub struct HtmlIssue
+    // Where in the source, so a linter can point at it.
+    at: Int
+    kind: HtmlIssueKind
+
+// HtmlIssueKind names what was wrong.
+//
+// A named set rather than a message string, so that a caller can
+// decide which ones it cares about — a CI check might fail on a
+// duplicate id and ignore an unclosed `<p>`.
+pub enum HtmlIssueKind
+    // An end tag with no matching open tag.  Dropped.
+    IssueStrayEndTag(tag: HtmlRange)
+    // An element the document never closed.  Closed at its parent's
+    // end.
+    IssueUnclosedElement(tag: HtmlRange)
+    // Two elements with the same `id`.
+    IssueDuplicateId(id: HtmlRange)
+    // A character reference that is not one, or a numeric reference
+    // that is not a scalar value.  Left as text, or replaced with
+    // U+FFFD, per the HTML5 rules.
+    IssueBadCharacterReference(at: HtmlRange)
+    // A construct in the named subset of the tree-construction
+    // algorithm this package refuses.  The README lists all four, and
+    // this is how a document that used one finds out.
+    IssueUnsupportedConstruct(what: HtmlRange)
+
+// root is the document node's index, which is always 0.
+pub fn root(doc: HtmlDoc) -> Int []
+    todo("html-nv.htmltree.root")
+
+// count is how many nodes the tree holds.
+pub fn count(doc: HtmlDoc) -> Int []
+    todo("html-nv.htmltree.count")
+
+// node is the node at an index, or `None` for an index the caller
+// invented.
+pub fn node(doc: HtmlDoc, index: Int) -> ?HtmlNode []
+    todo("html-nv.htmltree.node")
+
+// children is every child index of a node, in order.
+//
+// The allocating convenience; `first_child` and `next_sibling` are the
+// walk that allocates nothing.
+pub fn children(doc: HtmlDoc, index: Int) -> [Int] []
+    todo("html-nv.htmltree.children")
+
+// tag_name is an element's lowercased tag name, or "" for a node that
+// is not an element.
+//
+// ```novo
+// use htmlparse
+// use htmltree
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p>hi</p>")
+//     println(htmltree.tag_name(doc, 1))
+// ```
+pub fn tag_name(doc: HtmlDoc, index: Int) -> Str []
+    todo("html-nv.htmltree.tag_name")
+
+// attr is an element's attribute value by name, decoded.
+//
+// `None` when the element does not have it.  `Some("")` for a
+// valueless attribute — `<input disabled>` — because "present with no
+// value" and "absent" are different answers and collapsing them is how
+// a form ends up enabled.
+pub fn attr(doc: HtmlDoc, index: Int, name: Str) -> ?Str []
+    todo("html-nv.htmltree.attr")
+
+// has_attr answers whether an element has an attribute at all.
+pub fn has_attr(doc: HtmlDoc, index: Int, name: Str) -> Bool []
+    todo("html-nv.htmltree.has_attr")
+
+// classes is an element's `class` attribute split on whitespace.
+//
+// Here rather than left to the caller because "does this element have
+// this class" is the single most common question asked of an HTML
+// tree, and splitting the attribute at every call site is how a
+// substring match on `class` ends up matching `navbar` inside
+// `navbar-brand`.
+pub fn classes(doc: HtmlDoc, index: Int) -> [Str] []
+    todo("html-nv.htmltree.classes")
+
+// text_of is a text node's content, decoded.
+//
+// Decoding is where the character references are resolved, so a caller
+// that only wanted to know WHERE the text is never pays for it.
+pub fn text_of(doc: HtmlDoc, index: Int) -> Str []
+    todo("html-nv.htmltree.text_of")
+
+// inner_text is every text descendant of a node, concatenated and
+// decoded.
+//
+// The contents of `<script>` and `<style>` are NOT included: they are
+// text nodes as far as the parser is concerned, and a search index or
+// an excerpt that included them would index a stylesheet.
+pub fn inner_text(doc: HtmlDoc, index: Int) -> Str []
+    todo("html-nv.htmltree.inner_text")
+
+// is_void answers whether a tag name is one of HTML5's void elements.
+//
+// `area base br col embed hr img input link meta source track wbr` —
+// the fourteen that never have children and never have an end tag.
+// Public because a serialiser, a sanitiser and a caller building a
+// document all need the same list, and three copies of it is three
+// places for it to be wrong.
+pub fn is_void(tag: Str) -> Bool []
+    todo("html-nv.htmltree.is_void")
+
+// is_raw_text answers whether a tag name's contents are not markup.
+//
+// `script style textarea title`.  A `<` inside one of them is a `<`,
+// which is why they need their own tokenizer states and why a
+// sanitiser that removes a `<script>` element must remove its
+// CONTENTS too rather than leaving them as text.
+pub fn is_raw_text(tag: Str) -> Bool []
+    todo("html-nv.htmltree.is_raw_text")
