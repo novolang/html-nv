@@ -1,293 +1,325 @@
 # html-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+HTML is the markup language of the web, and its parsing is specified by
+the [WHATWG HTML Standard section 13](https://html.spec.whatwg.org/multipage/parsing.html).
+That specification is written to be tolerant: it says what every
+browser must do with a document nobody meant to write, and it has no
+fatal errors. This package brings a tolerant HTML reader, a tree, a
+finder, a writer and a sanitiser to novo-lang.
+[tera-nv](https://novo-lang.org/packages/tera-nv) uses its escaping.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`. Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is
+declared with its full signature, but every body is a `todo()` that
+panics when called. The package is published so its design can be
+reviewed and depended on before it is implemented. Version 0.1.0 will
+be the first working release.
 
-## What this is
+## What the pieces are
 
-Tolerant HTML: read a document that was never valid, find things in it,
-write it back out, and — separately — decide what a publisher is
-allowed to have written.
+Reading HTML happens in two stages. The **tokenizer** (section 13.2.5)
+turns bytes into a flat sequence of **tokens**: a doctype, a start tag,
+an end tag, a comment, a run of characters, and the end of the file.
+**Tree construction** (section 13.2.6) turns that sequence into a tree
+of elements, inserting what the document left implied and closing what
+it left open.
 
-- `htmlparse` — the HTML5 tokenizer, and a **named subset** of tree
-  construction;
-- `htmltree` — the document as a flat arena over the caller's source;
-- `htmlquery` — by tag, by attribute, and a named subset of CSS;
-- `htmlwrite` — a tree back out, into a buffer the caller owns;
-- `htmlsafe` — escaping, and sanitising, and why they are two jobs.
+A **character reference** is `&` followed by a name or a number, such
+as `&amp;` or `&#169;`. The specification names 2231 of them. The
+tokenizer resolves references in text and in attribute values.
+
+A **void element** is one that cannot have children, such as `br` and
+`img`. A **raw-text element** is one whose contents are not markup,
+such as `script`, `style`, `textarea` and `title`. Both are lists the
+specification fixes.
+
+A **fragment** is a document parsed as if it were the contents of some
+element, which is what a template or a rendered comment is. Section
+13.4 is the fragment parsing algorithm, and the context element decides
+what is allowed inside.
+
+**Escaping** turns text into markup that renders as that text: `<`
+becomes `&lt;` and so on. It is total, and it needs no tree.
+**Sanitising** takes a document that is markup and removes what the
+publisher is not allowed to write. It is lossy, and it needs a tree,
+because "every `a` element's `href` attribute" is not a thing one can
+say about a string. They are two jobs and this package keeps them in
+two sets of functions.
+
+The tree here is a **flat arena**: one list of nodes, each holding
+indices to its parent and children, over the caller's own source
+string. A node's names and text are byte ranges into that source, so
+nothing is copied until a caller asks for a string.
+
+Every function in this package performs no input and no output. A
+document's `src` and `href` are reported and never followed.
+
+## Install
 
 ```
 novo pkg add html-nv
-novo pkg build
-novo test
 ```
 
-## The one example that will work — the registry's own job
+## Example
 
-```novo ignore
+```novo
 use htmlparse
+use htmlquery
 use htmlsafe
+use htmltree
 use htmlwrite
 
-// A published README, rendered, arriving on a page this origin serves.
-fn safe_readme(rendered: Str) -> Str
-    let doc = htmlparse.parse_fragment(rendered, "div")
+fn main() [io]
+    // A document that was never valid: the paragraph is left open.
+    let doc = htmlparse.parse("<p>hello <a href='https://example.org'>there")
+
+    // Every link in the tree, by tag name rather than by selector.
+    for i in htmlquery.by_tag(doc, htmltree.root(doc), "a")
+        match htmltree.attr(doc, i, "href")
+            Some(url) => println("link to ${url}")
+            None      => println("a link with no href")
+
+    // Remove everything a README is not allowed to write, then write
+    // the tree back out as a string.
     let clean = htmlsafe.sanitize(doc, htmlsafe.allow_readme())
-    htmlwrite.serialize_str(clean, htmlwrite.default_options())
+    println(htmlwrite.serialize_str(clean, htmlwrite.default_options()))
 ```
 
-## The load-bearing interfaces — there are two
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a
+`not implemented: html-nv.<module>.<fn>` panic. The tests are the
+specification the implementation will have to satisfy.
 
-**Reading: the tokenizer, which is the whole spec and is testable.**
+## What the package contains
 
-```novo ignore
-pub fn next_token(t: HtmlTokenizer) -> ?HtmlTokenStep []
-```
-
-Bytes in, tokens out, the state as a value, no tree. All eighty states,
-the character-reference machine, the raw-text and script-data escapes,
-the bogus-comment path — there is no honest way to implement a subset
-of it, and html5lib-tests checks exactly this shape.
-
-**Safety: the allow-list, which is a value.**
-
-```novo ignore
-pub struct HtmlAllowList
-    tags: [Str]
-    attrs: [HtmlAttrRule]
-    url_schemes: [Str]
-    strip_contents_of: [Str]
-    ...
-
-pub fn sanitize(doc: HtmlDoc, allow: HtmlAllowList) -> HtmlDoc []
-```
-
-A documentation site, a registry rendering READMEs, a comment box and a
-mail client want four different policies, and the difference between
-them is **data**, not flags. `allow_none()`, `allow_basic()` and
-`allow_readme()` are named lists to start from; `with_tag` and
-`without_tag` modify one in a line.
-
-## Escaping and sanitising are not the same job
-
-A package that offered one function called `clean` would be offering
-the wrong one to half its callers.
-
-| | escaping | sanitising |
-| --- | --- | --- |
-| input | text that was never meant to be markup | a document that **is** markup |
-| output | text that renders as itself | a document with what a publisher may not write removed |
-| totality | total — every input has an escaped form | necessarily lossy |
-| what it needs | five characters | a tree |
-
-**Sanitising cannot be done on text**, and that is the argument this
-package exists to make. An allow-list over a substring search is not an
-allow-list.
-
-## The dogfood: what the registry does today, and why it is safe by accident
-
-`orbit/website/src/packages.nv` renders a published README into the
-registry's own origin, with two functions:
-
-- `safe_href(url)` — trims, lowercases, and accepts `https://`,
-  `http://`, `mailto:`, a `#` fragment or a `/` path; everything else
-  becomes `#`. The allow-list is right.
-- `sanitize_hrefs(html)` — finds every `href="` in the **rendered
-  HTML** by substring search and rewrites the value to the closing
-  quote.
-
-That is safe today. It is safe **by accident of composition**: it works
-only because `markdown.to_html` escapes the whole document before it
-substitutes inline markup — so no tag a README wrote can survive — and
-because that renderer emits an `href` from exactly one place. The
-comment above `sanitize_hrefs` says as much, and is correct.
-
-Change either fact and the search is wrong in three ways at once:
-
-- it rewrites an `href="` **inside a code sample**, where the text is
-  content;
-- it rewrites one **inside a text node**, where the same is true;
-- it does not touch `src`, `srcset`, `formaction`, `xlink:href`,
-  `onclick`, `onerror` or `style` — none of which is an `href` and
-  every one of which is a way to run script or load a tracker.
-
-And `safe_href`'s own check is a `starts_with` on a lowercased string.
-A browser strips leading whitespace and C0 controls from a URL and
-decodes character references **before** it looks at the scheme, so
-`  javascript:`, `java\tscript:` and `java&#09;script:` are all
-`javascript:` to a browser and none of them is to a `starts_with`.
-`htmlsafe.safe_url` makes that check; `tests/htmlsafe_tests.nv` has all
-four spellings.
-
-On a tree, *every `a` element's `href` attribute* is a thing you can
-say. That is the whole difference, and it is why this package's
-sanitiser takes an `HtmlDoc` and not a `Str`.
-
-## The named subset, and its four refusals
-
-The HTML5 tree-construction algorithm is twenty-three insertion modes,
-a stack of open elements, a list of active formatting elements, foster
-parenting and the adoption agency algorithm. It exists to make every
-browser agree about documents nobody meant to write. This package
-implements the part a scraper, a sanitiser and a linter need, and
-**names what it refuses** rather than approximating it.
-
-**Implemented:** the void elements; the raw-text elements
-(`script`, `style`, `textarea`, `title`); implied end tags for `p`,
-`li`, `dd`, `dt`, `option`, `td`, `th`, `tr`, `thead`, `tbody`,
-`tfoot`; an end tag matching an ancestor closing everything up to it; a
-stray end tag dropped and reported; anything still open closed at the
-end and reported; the fragment case.
-
-**Refused — each raising `IssueUnsupportedConstruct`, never silently
-approximated:**
-
-| refused | what happens instead |
+| Module | Contents |
 | --- | --- |
-| the adoption agency algorithm — `<b>a<i>b</b>c</i>` | the `</b>` closes the `<i>` as well; both are reported |
-| foster parenting — content in a table but outside a cell | it stays where it was written, as a child of the table |
-| `<template>` contents as their own fragment | a template's children are ordinary children |
-| foreign content — SVG and MathML integration points | `<svg>` is an ordinary element, its names lowercased |
+| `htmltree` | The document as a flat arena of nodes over the caller's source, the recovery issues a parse reports, and the lookups on a node. |
+| `htmlparse` | The tokenizer as a value, the whole-document and fragment parsers, and the parse limits. |
+| `htmlquery` | Finding nodes: by tag, by identifier, by class, by attribute, and by a compiled subset of CSS. |
+| `htmlwrite` | A tree back out into a buffer the caller owns, and the three calls for writing a tag by hand. |
+| `htmlsafe` | Escaping, unescaping, the named character reference table, and sanitising against an allow-list. |
 
-A reader who needs any of those four needs a browser engine, and should
-learn that from a named issue rather than from a rendering that is
-subtly wrong.
+## How to choose an entry point
 
-**There is no error type**, and that is the specification's decision
-rather than this package's: the parsing algorithm has no fatal errors.
-`doc.issues` carries every recovery, named and positioned, so a linter
-can fail on what it chooses to.
+**`htmlparse.parse` reads a whole document.** `parse_fragment` reads
+one as the contents of a named element, which is what a rendered
+comment or a template is. `parse_with` is `parse` with limits the
+caller chose.
 
-## The selector subset
+**`htmlparse.tokenizer` and `next_token` are the tokenizer on its
+own.** Use them when a scraper wants one tag and no tree, or when a
+rewriter edits the source in place: every token carries the byte range
+it occupied.
 
-Compiled once, matched many times. In: `*`, type, `#id`, `.class`, the
-seven attribute operators (`[a]`, `=`, `~=`, `^=`, `$=`, `*=`, `|=`),
-descendant, `>`, `+`, `~`, groups, and
-`:first-child :last-child :only-child :empty :root`.
+**`htmlquery.by_tag`, `by_id`, `by_class` and `by_attr` cost no
+parsing.** Use them for a single condition. `by_class` matches a whole
+word, so `navbar` does not match `class="navbar-brand"`.
 
-Refused, as a named `HtmlSelectorError` with a position:
-`:nth-child()` and its family (a counting pass plus the `an+b`
-micro-syntax), `:not() :has() :is() :where()` (a selector list nested
-inside a selector), the pseudo-*elements*, the state pseudo-classes
-(`:hover`, `:checked`), and namespaces.
+**`htmlquery.compile` and `select_all` are for a selector.** A selector
+is compiled once and matched many times, and a selector this package
+does not support is refused with a position rather than matching
+nothing.
 
-A refusal is an error because the alternative is worse: a selector
-engine that accepted `:nth-child(2n)` and matched nothing would leave a
-caller debugging their document instead of their selector.
+**`htmlsafe.escape_text` and `escape_attr` take text that was never
+markup.** `sanitize` takes a document that is.
 
-`by_tag`, `by_id`, `by_class` and `by_attr` are beside the selector
-surface, not under it. They cost no parsing and cannot be misspelled
-into something that silently matches nothing — and `by_class` matches a
-**word**, so `navbar` does not match `class="navbar-brand"`, which is
-the bug a `str.contains` on the attribute always has.
+## The rules a user needs
 
-## The round trip is not an identity, and the promise is narrower
+1. **Escaping and sanitising are different jobs.** Escaping is total:
+   every input has an escaped form, and it needs five characters.
+   Sanitising is lossy and needs a tree. An allow-list applied by
+   searching a string is not an allow-list.
+2. **`htmlsafe.safe_url` is the URL check, and `starts_with` is not.**
+   A browser strips leading whitespace and C0 control characters from a
+   URL, and decodes character references, before it looks at the
+   scheme. `  javascript:`, `java<tab>script:` and `java&#09;script:`
+   all reach a browser as `javascript:`.
+3. **An allow-list is data, not flags.** `allow_none()`,
+   `allow_basic()` and `allow_readme()` are lists to start from, and
+   `with_tag`, `without_tag` and `with_attr_rule` each change one in a
+   line.
+4. **A tag that is not allowed is unwrapped, and its children stay.**
+   An element in `strip_contents_of` is removed with its contents
+   instead. `script` and `style` must be in that list, because their
+   contents are raw text and unwrapping one leaves its code on the page
+   as prose.
+5. **A URL attribute must be named as one.** `HtmlAttrRule.url_attrs`
+   is the subset of `attrs` whose value is checked against
+   `url_schemes`. A URL attribute that is merely allowed is the hole
+   the module exists to close. `href` is not the only one: `src`,
+   `srcset`, `formaction`, `xlink:href` and the event-handler
+   attributes each load or run something.
+6. **`web_schemes()` is `http`, `https`, `mailto` and `tel`.** It does
+   not include `data:`, which is a script vector in an `href`.
+7. **A refused URL becomes `HtmlAllowList.refused_url`, not nothing.**
+   The default is `#`, so the link is visibly inert and a reader can
+   see that something was there.
+8. **The parser has no error type**, because the specification's
+   algorithm has no fatal errors. `HtmlDoc.issues` carries every
+   recovery, named and positioned, and a linter decides which ones
+   matter.
+9. **Four tree-construction constructs are refused, not approximated.**
+   Each raises `IssueUnsupportedConstruct`. A reader who needs one of
+   them needs a browser engine.
 
-`serialize(parse(s))` is not `s`, and cannot be: the parser closed what
-the document left open, dropped what it could not place, lowercased the
-names and resolved the character references.
+   | Refused | What happens instead |
+   | --- | --- |
+   | The adoption agency algorithm, as in `<b>a<i>b</b>c</i>` | The `</b>` closes the `<i>` as well, and both are reported |
+   | Foster parenting: content in a table but outside a cell | It stays where it was written, as a child of the table |
+   | A `<template>`'s contents as their own fragment | A template's children are ordinary children |
+   | Foreign content: SVG and MathML integration points | `<svg>` is an ordinary element and its names are lowercased |
 
-What **is** promised is that `parse(serialize(parse(s)))` has the same
-tree as `parse(s)`. That is the property a sanitiser depends on — a
-sanitiser whose output re-parsed to something else would be one that
-could be talked out of its own policy — and it is what the suite
-checks.
+10. **`serialize(parse(s))` is not `s`.** The parser closed what the
+    document left open, dropped what it could not place, lowercased the
+    names and resolved the character references. What is promised is
+    that `parse(serialize(parse(s)))` has the same tree as `parse(s)`.
+    A sanitiser depends on that property.
+11. **A self-closing slash is honoured only on a void element and on
+    foreign content.** On anything else it is reported and ignored,
+    which is what section 13.2.5 says and what surprises everybody.
+12. **Tag and attribute names are matched ASCII case-insensitively**
+    and stored lowercased. That is the specification's own rule, not an
+    approximation of Unicode case folding.
+13. **`htmlwrite.pretty_options()` is for reading, not for
+    publishing.** Indentation changes what a document means wherever
+    whitespace is significant, inside a `pre` and between two inline
+    elements. `default_options()` indents by zero.
+14. **The serialiser keeps comments even when the sanitiser drops
+    them.** Serialising is not sanitising, and a writer that silently
+    dropped part of its input would make rule 10 untrue.
+15. **A selector this package does not support is an error, not an
+    empty match.** A selector engine that accepted `:nth-child(2n)` and
+    matched nothing would leave a caller debugging the document instead
+    of the selector. `HtmlSelectorError` carries the position.
 
-## The layer, and the absent dependency
+## What the selector subset covers
 
-`core` — no effects. A tokenizer over a string the caller already
-holds, a tree of indices, a serialiser that appends to the caller's
-buffer. **Nothing is fetched**: a document's `<img src>` and
-`<script src>` are reported as what they are and never followed, which
-is a security property as much as a layer one.
+| Supported | |
+| --- | --- |
+| Simple | `*`, a type name, `#id`, `.class` |
+| Attribute | `[a]`, `[a=v]`, `[a~=v]`, `[a^=v]`, `[a$=v]`, `[a*=v]`, `[a\|=v]` |
+| Combinators | descendant, `>`, `+`, `~`, and comma-separated groups |
+| Pseudo-class | `:first-child`, `:last-child`, `:only-child`, `:empty`, `:root` |
 
-**unicode-nv is not a dependency, and that is a finding rather than an
-oversight.** HTML5 defines tag and attribute name matching as **ASCII**
-case-insensitive, deliberately and explicitly, so `DIV` and `div` are
-the same element with no Unicode table anywhere. The one big table this
-package needs — the 2231 named character references, about 40 KB — is
-HTML's own, not Unicode's, and lives here. The two places a Unicode
-question could have appeared: a numeric character reference naming a
-surrogate becomes U+FFFD, which is a range check rather than a table;
-and a URL scheme is ASCII by RFC 3986.
+Refused, each as an `HtmlSelectorError` with a position:
+`:nth-child()` and its family, `:not()`, `:has()`, `:is()`, `:where()`,
+the pseudo-elements, the state pseudo-classes such as `:hover` and
+`:checked`, and namespaces.
 
-**No `@tier(embedded)` claim, and none is intended.** The entity table
-alone is 40 KB, the tree is a growable list, and nothing on a device
-parses HTML. The audit's `core-embedded` row passes as *makes no device
-claim*.
+## Sizes and limits
 
-## Where the names come from, and the ones that were taken
-
-Public type names are unique across the whole assembly, dependencies
-included.
-
-| here | the obvious name | why not |
+| `HtmlLimits` field | What it bounds | `default_limits()` |
 | --- | --- | --- |
-| `HtmlNode` | `Node` | certain to collide — markdown-nv wants it in this same lane, and `NodeError` is already published |
-| `HtmlDoc` | `Document` | `TomlDoc`, `YamlDoc`, `JsonDoc` and `XmlDoc` are the standard library's precedent for exactly this |
-| `HtmlKind` | `Element`, `NodeKind` | `Element` is the name three other packages will want |
-| `HtmlAttr` | `Attr`, `Attribute` | generic |
-| `HtmlToken`, `HtmlTokenKind` | `Token`, `TokenKind` | sql-engine-nv publishes `Token` and `TokKind` |
-| `HtmlRange` | `Range`, `Span` | `ElfRange` and `ZipRange` are the precedent; `Span` is a module name in use |
-| `HtmlSelector` | `Selector` | generic, and `Selection` and `SelItem` are already published by sql-engine-nv |
-| `HtmlAllowList` | `AllowList`, `Policy`, `Sanitizer` | all three generic enough to collide with a future security package |
-| `HtmlIssue`, `HtmlIssueKind` | `Issue`, `Diagnostic` | generic |
-| module `htmlparse`, `htmltree`, … | `html`, `parse`, `tree`, `query`, `write`, `safe` | every one of the six is a name another package will want, and `dom` is a **standard-library module** |
+| `max_depth` | How deeply elements may nest | 512 |
+| `max_nodes` | How many nodes the tree may hold | 1,000,000 |
+| `max_attributes` | How many attributes one element may carry | 4,096 |
 
-Nothing here collided with markdown-nv or tera-nv, in the same lane, by
-construction: the three packages prefix their types with `Md`, `Html`
-and `Tera` and their modules with the same.
+A document past `max_depth` is truncated rather than recursed into. The
+pathological input is a file of 100,000 `<div>` tags.
 
-## The reference implementation
+| Other quantity | Value |
+| --- | --- |
+| Named character references | 2,231 |
+| Characters escaped by `escape_text` | 5 |
 
-**html5ever** for the tokenizer's shape and for the decision to make it
-public rather than internal. **BeautifulSoup** for the query
-vocabulary, and for the observation that most callers want `find_all`
-by tag rather than a selector. **lol-html** for the streaming rewrite
-model that `HtmlToken.span` makes possible. **ammonia** and
-**DOMPurify** for the sanitiser's allow-list shape, the unwrap-versus-
-strip distinction, and the URL-scheme check. **`orbit/website`'s
-`safe_href`** for the list of schemes a published document may link to,
-which is where `web_schemes()` comes from.
+## What is not included
 
-The oracles are:
+- **Rendering, layout and the CSS cascade.** That is a browser engine.
+- **Fetching anything.** This package declares no effects. A
+  document's `src` is reported and never followed.
+- **Mutating a tree in place.** The tree is a value, and `sanitize`
+  answers a new one. A caller assembling HTML uses
+  `htmlwrite.write_start_tag` and its neighbours.
+- **The four tree-construction constructs in rule 9.**
+- **The selector features listed above.**
+- **XML and XHTML parsing.** `htmlwrite`'s `xhtml` option changes the
+  output syntax only. [xml-nv](https://novo-lang.org/packages/xml-nv)
+  is the XML package.
+- **Content Security Policy and anything else about headers.** A
+  sanitiser decides what a document may contain. A header decides what
+  a browser may do with it.
+- **A build for a microcontroller.** The character reference table
+  alone is about 40 KB and the tree is a growable list, so this package
+  makes no device claim.
+- **A Unicode dependency.** HTML matches names ASCII
+  case-insensitively by design, the character reference table is
+  HTML's own rather than Unicode's, a numeric reference naming a
+  surrogate becomes U+FFFD by a range check, and a URL scheme is ASCII
+  under RFC 3986.
 
-- **html5lib-tests** — `tokenizer/*.test` for the tokenizer, which is
-  the suite every parser is measured against, and `tree-construction/`
-  for the part of the tree algorithm this package implements;
-- the **named character reference table** from the HTML specification
-  itself, all 2231 of them;
-- the sanitiser's own attack corpus, which is the one thing not taken
-  from a spec: the four spellings of `javascript:`, the event-handler
-  attributes, and the raw-text elements that cannot be unwrapped.
+## Related packages
 
-Deliberately left out, and where it goes instead:
+- [tera-nv](https://novo-lang.org/packages/tera-nv) renders templates
+  and autoescapes through this package's `escape_text`. Take it to
+  produce HTML. Take this one to read HTML or to clean it.
+- [markdown-nv](https://novo-lang.org/packages/markdown-nv) turns
+  Markdown into HTML. Its output is a document this package's
+  sanitiser takes.
+- [xml-nv](https://novo-lang.org/packages/xml-nv) is XML, which is
+  strict where this is tolerant.
+- [mime-nv](https://novo-lang.org/packages/mime-nv) decides whether a
+  response body is HTML at all before it is parsed.
+- [url-nv](https://novo-lang.org/packages/url-nv) parses and resolves
+  the URLs found in a document's attributes. This package checks a
+  URL's scheme and does not parse the rest.
+- `std.json` and the standard library's other document types are the
+  precedent for the `HtmlDoc` name.
 
-- **Rendering, layout and CSS cascade.** A browser engine.
-- **Fetching anything.** This package is `core`; a document's `src` is
-  reported and never followed.
-- **Mutating a tree in place.** The tree is a value; `sanitize` returns
-  a new one. A builder API is a different package, and a caller
-  assembling HTML has `htmlwrite.write_start_tag`.
-- **XML and XHTML strictness.** xml-nv's row on the plan. `htmlwrite`'s
-  `xhtml` option is about the output syntax, not about parsing.
-- **Content Security Policy, or anything about headers.** A sanitiser
-  decides what a document may contain; a header decides what a browser
-  may do with it, and that is the `web` package's.
+## Tests
 
-## Status
-
-Every function is `todo()`. Three suites, all red, all for the same
-reason — every assertion reaches `not implemented: html-nv.<fn>`, which
-is the expected result until the bodies land.
-
+```bash
+novo test tests/htmlparse_tests.nv   # the tokenizer cases and the four refusals
+novo test tests/htmlquery_tests.nv   # the selector subset and the round trip
+novo test tests/htmlsafe_tests.nv    # escaping and the sanitiser's attack corpus
 ```
-novo test --isolate tests/htmlparse_tests.nv   # html5lib-tests' tokenizer cases, and the four refusals
-novo test --isolate tests/htmlquery_tests.nv   # the selector subset, and the round-trip property
-novo test --isolate tests/htmlsafe_tests.nv    # escaping, and the sanitiser's attack corpus
-```
 
-`novo doc` renders and its examples compile.
+The tokenizer's reference data is html5lib-tests, the suite every HTML
+parser is measured against, with its `tree-construction` cases for the
+part of section 13.2.6 this package implements. The named character
+reference table is the HTML Standard's own, all 2231 entries. The
+reference implementations are html5ever for the tokenizer's shape,
+BeautifulSoup for the query vocabulary, lol-html for the streaming
+rewrite that a token's byte range makes possible, and ammonia and
+DOMPurify for the allow-list's shape and the URL scheme check.
+
+The sanitiser's corpus is the one set of cases not taken from a
+specification: the four spellings of `javascript:` named in rule 2, the
+event-handler attributes, and the raw-text elements that cannot be
+unwrapped. The suite also asserts the round-trip property of rule 10,
+that `by_class` matches a whole word, and that each refused selector
+raises rather than matching nothing.
+
+The tests compile today and fail at run, each on the
+`not implemented: html-nv.<module>.<fn>` panic that is its body. That
+is the expected state of an interface release. They turn green one at a
+time as bodies land.
+
+## Implementation status
+
+| Item | Implemented |
+| --- | --- |
+| `htmltree.NO_NODE` | yes (it is a constant) |
+| Every `pub struct` and `pub enum` in the five modules | the types are declared |
+| `htmltree.root`, `.count`, `.node`, `.children` | no |
+| `htmltree.tag_name`, `.attr`, `.has_attr`, `.classes`, `.text_of`, `.inner_text` | no |
+| `htmltree.is_void`, `.is_raw_text` | no |
+| `htmlparse.default_limits`, `.parse`, `.parse_with`, `.parse_fragment` | no |
+| `htmlparse.tokenizer`, `.tokenizer_in`, `.next_token`, `.token_text` | no |
+| `htmlparse.line_of`, `.issue_text` | no |
+| `htmlquery.compile`, `.selector_text`, `.error_text`, `HtmlSelectorError.message` | no |
+| `htmlquery.matches`, `.select`, `.select_all`, `.closest`, `.walk` | no |
+| `htmlquery.by_tag`, `.by_id`, `.by_class`, `.by_attr`, `.by_attr_value` | no |
+| `htmlwrite.default_options`, `.pretty_options` | no |
+| `htmlwrite.serialize`, `.serialize_node`, `.serialize_children`, `.serialize_str` | no |
+| `htmlwrite.write_start_tag`, `.write_end_tag`, `.write_text` | no |
+| `htmlsafe.allow_none`, `.allow_basic`, `.allow_readme`, `.web_schemes` | no |
+| `htmlsafe.with_tag`, `.without_tag`, `.with_attr_rule` | no |
+| `htmlsafe.sanitize`, `.sanitize_removals`, `.safe_url` | no |
+| `htmlsafe.escape_text`, `.escape_attr`, `.escape_text_str`, `.escape_attr_str` | no |
+| `htmlsafe.unescape`, `.unescape_into`, `.named_reference` | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

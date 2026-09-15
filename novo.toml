@@ -1,6 +1,6 @@
 [package]
 name        = "html-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Tolerant HTML5: the tokenizer as the specification writes it, a flat-arena tree over the caller's source with a NAMED subset of the tree-construction algorithm and its four refusals listed, finding nodes by tag or by a named subset of CSS, a serialiser that appends to a caller's buffer, and escaping and sanitising as separate functions with the allow-list as a value.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
