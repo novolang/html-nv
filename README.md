@@ -240,7 +240,7 @@ pathological input is a file of 100,000 `<div>` tags.
   a browser may do with it.
 - **A build for a microcontroller.** The character reference table
   alone is about 40 KB and the tree is a growable list, so this package
-  makes no device claim.
+  does not build for a microcontroller with no heap allocator.
 - **A Unicode dependency.** HTML matches names ASCII
   case-insensitively by design, the character reference table is
   HTML's own rather than Unicode's, a numeric reference naming a
