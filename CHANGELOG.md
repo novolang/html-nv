@@ -5,6 +5,54 @@ All notable changes to html-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the
+tokenizer, a named subset of tree construction, queries, the
+serialiser, escaping and the sanitiser.
+
+### Added
+
+- The tokenizer is the whole of WHATWG HTML section 13.2.5, and it
+  produces the tokens of every case of html5lib-tests' tokenizer suite
+  that a `Str` can hold: 6499 of them, in
+  `tests/html5lib_tokenizer_tests.nv`.
+- Tree construction follows the subset the README lists, and 219
+  tree-construction cases of web-platform-tests' copy of the html5lib
+  tests, in `tests/html5lib_tree_tests.nv`, build the trees a browser
+  builds.  The cases the adoption agency algorithm decides are asserted
+  to raise `IssueUnsupportedConstruct`.
+- `htmlentity`, a module with no public functions, holds the 2231 named
+  character references, written by `tools/entities.py`, and the
+  decoding the other modules call.
+- `tests/differential_tests.nv`, written by `tools/differential.py`,
+  compares the tokenizer with Python's `html.parser` over 150
+  documents.  Every line under `src/` is run by the suites;
+  `bash tests/coverage.sh` prints the number.
+
+### Changed
+
+These break code written against 0.0.x.
+
+- `HtmlIssueKind` has a sixth variant, `IssueSelfClosingNonVoid`, for
+  the `/>` on a non-void element that the parser reports and ignores.
+- `HtmlDoc.source` and `HtmlTokenizer.source` are the caller's text
+  after the preprocessing of section 13.2.3.5: CR LF and CR are LF,
+  and tag and attribute names are lowered.  Every range points into
+  them.
+- `HtmlTokenizer` has three more fields: `last`, `switching` and
+  `ended`.  A tokenizer is made with `tokenizer` or `tokenizer_in`.
+- The tree holds what the document wrote: no `html`, `head` or `body`
+  element is added.
+- `is_void` answers the thirteen void elements of the Standard, not
+  fourteen, and `is_raw_text` answers all nine raw-text elements, not
+  four.
+- `escape_text` escapes three characters, `&`, `<` and `>`.
+  `escape_attr` escapes five.
+- A function that takes a byte list answers a new list with the
+  output after the one passed in, and leaves that one as it was.
+- The toolchain floor is 0.13.0.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

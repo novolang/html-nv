@@ -1,21 +1,18 @@
 [package]
 name        = "html-nv"
-version     = "0.0.2"
-description = "Tolerant HTML5: the tokenizer as the specification writes it, a flat-arena tree over the caller's source with a NAMED subset of the tree-construction algorithm and its four refusals listed, finding nodes by tag or by a named subset of CSS, a serialiser that appends to a caller's buffer, and escaping and sanitising as separate functions with the allow-list as a value.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "Tolerant HTML5: the tokenizer as the specification writes it, a flat-arena tree over the source with a named subset of the tree-construction algorithm and its four refusals reported, finding nodes by tag or by a named subset of CSS, a serialiser, and escaping and sanitising as separate functions with the allow-list as a value."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental` because no program outside this repository has used the
+# package yet, and the tests were written against the signatures rather
+# than by a consumer.
+stability   = "experimental"
 
 # `core`.  A tokenizer over a string the caller already holds, a tree
-# of indices, and a serialiser that appends to the caller's buffer.
-# Nothing is fetched — a document's `<img src>` and `<script src>` are
-# reported as what they are and never followed, which is a security
-# property as much as a layer one.
+# of indices, and a serialiser that answers bytes.  Nothing is fetched:
+# a document's `<img src>` and `<script src>` are reported and never
+# followed.
 layer       = "core"
 
 category    = "web"
@@ -23,7 +20,7 @@ category    = "web"
 tags        = ["html", "html5", "parser", "tolerant", "dom", "css-selector", "sanitize", "escape", "scraping", "sans-io"]
 repository  = "https://github.com/novolang/html-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.13.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
@@ -32,16 +29,9 @@ novo        = ">= 0.8.9"
 "README.md" = "Tolerant HTML, and the difference between escaping and sanitising"
 
 [dependencies]
-# NONE, AND THE ABSENCE IS A FINDING RATHER THAN AN OVERSIGHT.  The
-# obvious dependency would be unicode-nv, and HTML5 does not need it:
-# the specification defines tag and attribute name matching as ASCII
-# case-insensitive, deliberately, so `DIV` and `div` are the same
-# element without a Unicode table anywhere.  The one big table this
-# package does need — the 2231 named character references — is HTML's
-# own, not Unicode's, and lives here.
-#
-# The two places a Unicode question could have appeared, and what
-# happens instead: a numeric character reference naming a surrogate
-# becomes U+FFFD, which is a range check rather than a table; and
-# `htmlsafe.safe_url`'s scheme comparison is ASCII-lowercased, because
-# a URL scheme is ASCII by RFC 3986.
+# None.  HTML matches tag and attribute names ASCII
+# case-insensitively, so no Unicode table is needed.  The one large
+# table, the 2231 named character references, is HTML's own and lives
+# in `src/htmlentity.nv`.  A numeric reference naming a surrogate
+# becomes U+FFFD by a range check, and a URL scheme is ASCII under
+# RFC 3986.

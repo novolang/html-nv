@@ -8,12 +8,6 @@ fatal errors. This package brings a tolerant HTML reader, a tree, a
 finder, a writer and a sanitiser to novo-lang.
 [tera-nv](https://novo-lang.org/packages/tera-nv) uses its escaping.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What the pieces are
 
 Reading HTML happens in two stages. The **tokenizer** (section 13.2.5)
@@ -46,9 +40,16 @@ say about a string. They are two jobs and this package keeps them in
 two sets of functions.
 
 The tree here is a **flat arena**: one list of nodes, each holding
-indices to its parent and children, over the caller's own source
-string. A node's names and text are byte ranges into that source, so
-nothing is copied until a caller asks for a string.
+indices to its parent and children, over the document's source. A
+node's names and text are byte ranges into that source, so nothing is
+copied until a caller asks for a string. The source a document holds is
+the caller's text after the preprocessing of section 13.2.3.5: each CR
+LF pair and each lone CR is a LF, and every tag and attribute name is
+lowered, which moves no byte.
+
+The tree holds what the document wrote. The `html`, `head` and `body`
+elements a browser adds are not added, so the tree of `<p>hi` is one
+`p` element under the document node.
 
 Every function in this package performs no input and no output. A
 document's `src` and `href` are reported and never followed.
@@ -84,11 +85,6 @@ fn main() [io]
     println(htmlwrite.serialize_str(clean, htmlwrite.default_options()))
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: html-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -97,7 +93,8 @@ specification the implementation will have to satisfy.
 | `htmlparse` | The tokenizer as a value, the whole-document and fragment parsers, and the parse limits. |
 | `htmlquery` | Finding nodes: by tag, by identifier, by class, by attribute, and by a compiled subset of CSS. |
 | `htmlwrite` | A tree back out into a buffer the caller owns, and the three calls for writing a tag by hand. |
-| `htmlsafe` | Escaping, unescaping, the named character reference table, and sanitising against an allow-list. |
+| `htmlsafe` | Escaping, unescaping, looking up a named character reference, and sanitising against an allow-list. |
+| `htmlentity` | The table of the 2231 named character references, and the decoding the other modules call. It has no public functions. |
 
 ## How to choose an entry point
 
@@ -159,24 +156,32 @@ markup.** `sanitize` takes a document that is.
    recovery, named and positioned, and a linter decides which ones
    matter.
 9. **Four tree-construction constructs are refused, not approximated.**
-   Each raises `IssueUnsupportedConstruct`. A reader who needs one of
-   them needs a browser engine.
+   Each raises `IssueUnsupportedConstruct` where it appears. A reader
+   who needs one of them needs a browser engine.
 
    | Refused | What happens instead |
    | --- | --- |
-   | The adoption agency algorithm, as in `<b>a<i>b</b>c</i>` | The `</b>` closes the `<i>` as well, and both are reported |
+   | The adoption agency algorithm and the reopening of formatting elements, as in `<b>a<i>b</b>c</i>` | The `</b>` closes the `<i>` as well, and a formatting element closed by something else stays closed |
    | Foster parenting: content in a table but outside a cell | It stays where it was written, as a child of the table |
    | A `<template>`'s contents as their own fragment | A template's children are ordinary children |
    | Foreign content: SVG and MathML integration points | `<svg>` is an ordinary element and its names are lowercased |
+
+   The rest of section 13.2.6 that this package implements: void
+   elements, raw-text elements, the implied end tags of `p`, `li`,
+   `dd`, `dt`, `option`, `td`, `th`, `tr` and the table sections, an
+   end tag that closes what was opened after its element, `</p>` with
+   no open `p` as an empty `p`, `</br>` as a `br`, a line feed right
+   after `<pre>` dropped, and in a document the whitespace before the
+   first element dropped. Tables get no implied `tbody`.
 
 10. **`serialize(parse(s))` is not `s`.** The parser closed what the
     document left open, dropped what it could not place, lowercased the
     names and resolved the character references. What is promised is
     that `parse(serialize(parse(s)))` has the same tree as `parse(s)`.
     A sanitiser depends on that property.
-11. **A self-closing slash is honoured only on a void element and on
-    foreign content.** On anything else it is reported and ignored,
-    which is what section 13.2.5 says and what surprises everybody.
+11. **A self-closing slash is honoured only on a void element.** On
+    anything else it is reported as `IssueSelfClosingNonVoid` and
+    ignored, as section 13.2.6.1 says, so `<div/>` opens a `div`.
 12. **Tag and attribute names are matched ASCII case-insensitively**
     and stored lowercased. That is the specification's own rule, not an
     approximation of Unicode case folding.
@@ -191,6 +196,9 @@ markup.** `sanitize` takes a document that is.
     empty match.** A selector engine that accepted `:nth-child(2n)` and
     matched nothing would leave a caller debugging the document instead
     of the selector. `HtmlSelectorError` carries the position.
+16. **A byte list passed to a writer is not changed.** `serialize`,
+    `escape_text` and the other functions that take one answer a new
+    list: the one passed in, with the output after it.
 
 ## What the selector subset covers
 
@@ -220,7 +228,8 @@ pathological input is a file of 100,000 `<div>` tags.
 | Other quantity | Value |
 | --- | --- |
 | Named character references | 2,231 |
-| Characters escaped by `escape_text` | 5 |
+| Characters escaped by `escape_text` | 3 |
+| Characters escaped by `escape_attr` | 5 |
 
 ## What is not included
 
@@ -239,8 +248,10 @@ pathological input is a file of 100,000 `<div>` tags.
   sanitiser decides what a document may contain. A header decides what
   a browser may do with it.
 - **A build for a microcontroller.** The character reference table
-  alone is about 40 KB and the tree is a growable list, so this package
+  alone is about 100 KB and the tree is a growable list, so this package
   does not build for a microcontroller with no heap allocator.
+- **Processing instructions as nodes.** `<?php ?>` is a bogus comment,
+  as html5lib-tests' tokenizer suite expects.
 - **A Unicode dependency.** HTML matches names ASCII
   case-insensitively by design, the character reference table is
   HTML's own rather than Unicode's, a numeric reference naming a
@@ -268,55 +279,44 @@ pathological input is a file of 100,000 `<div>` tags.
 ## Tests
 
 ```bash
-novo test tests/htmlparse_tests.nv   # the tokenizer cases and the four refusals
-novo test tests/htmlquery_tests.nv   # the selector subset and the round trip
-novo test tests/htmlsafe_tests.nv    # escaping and the sanitiser's attack corpus
+novo test tests/htmlparse_tests.nv            # the tokenizer and the tree through the public calls
+novo test tests/htmlbuild_tests.nv            # each rule of tree construction, and the element lists
+novo test tests/htmlquery_tests.nv            # finding nodes, and the serialiser's round trip
+novo test tests/htmlsafe_tests.nv             # escaping and the sanitiser's attack cases
+novo test tests/htmledge_tests.nv             # the edges of every module
+novo test tests/html5lib_tokenizer_tests.nv   # 6499 cases of html5lib-tests' tokenizer suite
+novo test tests/html5lib_tree_tests.nv        # 219 tree-construction cases
+novo test tests/differential_tests.nv         # 150 documents, compared with Python's html.parser
+bash tests/coverage.sh                        # line coverage over src/, merged across the suites
 ```
 
-The tokenizer's reference data is html5lib-tests, the suite every HTML
-parser is measured against, with its `tree-construction` cases for the
-part of section 13.2.6 this package implements. The named character
-reference table is the HTML Standard's own, all 2231 entries. The
-reference implementations are html5ever for the tokenizer's shape,
-BeautifulSoup for the query vocabulary, lol-html for the streaming
-rewrite that a token's byte range makes possible, and ammonia and
-DOMPurify for the allow-list's shape and the URL scheme check.
+`html5lib_tokenizer_tests.nv` is written by `tools/html5lib_tokens.py`
+from html5lib-tests, the suite HTML tokenizers are measured against,
+at a pinned commit. It holds every case a novo-lang `Str` can hold,
+from every file of the suite, in every start state but the CDATA
+section state, which only foreign content has. Each is an input and
+the exact tokens it must produce. Parse errors are not compared.
 
-The sanitiser's corpus is the one set of cases not taken from a
-specification: the four spellings of `javascript:` named in rule 2, the
-event-handler attributes, and the raw-text elements that cannot be
-unwrapped. The suite also asserts the round-trip property of rule 10,
-that `by_class` matches a whole word, and that each refused selector
-raises rather than matching nothing.
+`html5lib_tree_tests.nv` is written by `tools/html5lib_trees.py` from
+the tree-construction tests, which web-platform-tests now keeps. It
+holds the cases this package's subset answers the same way, with the
+children of `body` compared for a document. The script counts what it
+leaves out and why: tables, `template`, foreign content and the other
+insertion modes the subset does not implement, the elements a browser
+moves into `head`, and processing instructions. The nineteen cases
+whose trees the adoption agency algorithm decides are asserted to
+raise `IssueUnsupportedConstruct` instead.
 
-The tests compile today and fail at run, each on the
-`not implemented: html-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
+`differential_tests.nv` is written by `tools/differential.py`. It
+builds documents from a seeded generator, keeping to what Python's
+`html.parser` reads as HTML does, and compares the tokens.
 
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `htmltree.NO_NODE` | yes (it is a constant) |
-| Every `pub struct` and `pub enum` in the five modules | the types are declared |
-| `htmltree.root`, `.count`, `.node`, `.children` | no |
-| `htmltree.tag_name`, `.attr`, `.has_attr`, `.classes`, `.text_of`, `.inner_text` | no |
-| `htmltree.is_void`, `.is_raw_text` | no |
-| `htmlparse.default_limits`, `.parse`, `.parse_with`, `.parse_fragment` | no |
-| `htmlparse.tokenizer`, `.tokenizer_in`, `.next_token`, `.token_text` | no |
-| `htmlparse.line_of`, `.issue_text` | no |
-| `htmlquery.compile`, `.selector_text`, `.error_text`, `HtmlSelectorError.message` | no |
-| `htmlquery.matches`, `.select`, `.select_all`, `.closest`, `.walk` | no |
-| `htmlquery.by_tag`, `.by_id`, `.by_class`, `.by_attr`, `.by_attr_value` | no |
-| `htmlwrite.default_options`, `.pretty_options` | no |
-| `htmlwrite.serialize`, `.serialize_node`, `.serialize_children`, `.serialize_str` | no |
-| `htmlwrite.write_start_tag`, `.write_end_tag`, `.write_text` | no |
-| `htmlsafe.allow_none`, `.allow_basic`, `.allow_readme`, `.web_schemes` | no |
-| `htmlsafe.with_tag`, `.without_tag`, `.with_attr_rule` | no |
-| `htmlsafe.sanitize`, `.sanitize_removals`, `.safe_url` | no |
-| `htmlsafe.escape_text`, `.escape_attr`, `.escape_text_str`, `.escape_attr_str` | no |
-| `htmlsafe.unescape`, `.unescape_into`, `.named_reference` | no |
+The named character reference table is written by
+`tools/entities.py` from Python's `html.entities.html5`, which is the
+HTML Standard's list. The sanitiser's corpus is the one set of cases
+not taken from a specification: the spellings of `javascript:` named
+in rule 2, the event-handler attributes, and the raw-text elements
+that cannot be unwrapped.
 
 ## Licence
 
