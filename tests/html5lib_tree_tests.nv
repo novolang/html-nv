@@ -1,0 +1,413 @@
+// tests/html5lib_tree_tests.nv — tree construction against the
+// html5lib tree-construction tests, as web-platform-tests keeps them at
+// commit f085a1efc1f58fbe263d384b1e335d656fe58e66.
+//
+// Written by tools/html5lib_trees.py; do not edit by hand.  Each row
+// is an input, a context element for a fragment or an empty string for
+// a document, and the expected tree in the tests' own format: one node
+// per line, `| ` and two spaces per level, attributes sorted by name.
+// For a document the tree is the doctype and comments, then the
+// children of `body`, because this package adds no `html`, `head` or
+// `body`.  219 cases are here.  Left out: 87 for a context element outside the subset, 7 for a processing instruction, which the Standard now keeps as its own node, 37 for a tree beside or inside head, 204 for an element outside the subset, 19 for misnested formatting, 1 for scripting enabled.
+
+use std.test
+use std.str
+use htmlparse
+use htmltree
+
+// A document's tree in the tests' format.
+fn dump(doc: HtmlDoc) -> Str
+    var lines: [Str] = []
+    lines = dump_children(doc, htmltree.root(doc), 0, lines)
+    str.join(lines, "\n")
+
+// The lines of a node's children, adjacent text nodes joined.
+fn dump_children(doc: HtmlDoc, index: Int, level: Int, start: [Str]) -> [Str]
+    var lines = start[:]
+    let pad = "| " + str.repeat("  ", level)
+    var text = ""
+    var in_text = false
+    for c in htmltree.children(doc, index)
+        match doc.nodes[c].kind
+            HtmlText(_, _) =>
+                text = text + htmltree.text_of(doc, c)
+                in_text = true
+            kind           =>
+                if in_text
+                    lines = list.push(lines, pad + "\"" + text + "\"")
+                    text = ""
+                    in_text = false
+                match kind
+                    HtmlElement(_, _) =>
+                        lines = list.push(lines, pad + "<" + htmltree.tag_name(doc, c) + ">")
+                        lines = dump_attrs(doc, c, level + 1, lines)
+                        lines = dump_children(doc, c, level + 1, lines)
+                    HtmlComment(r)    =>
+                        lines = list.push(lines, pad + "<!-- " + str.slice(doc.source, r.start, r.end) + " -->")
+                    HtmlDoctype(r)    =>
+                        lines = list.push(lines, pad + "<!DOCTYPE " + str.slice(doc.source, r.start, r.end) + ">")
+                    _                 => ()
+    if in_text
+        lines = list.push(lines, pad + "\"" + text + "\"")
+    lines
+
+// The lines of an element's attributes, sorted by name, the first of a
+// repeated name kept.
+fn dump_attrs(doc: HtmlDoc, index: Int, level: Int, start: [Str]) -> [Str]
+    var lines = start[:]
+    var names: [Str] = []
+    match doc.nodes[index].kind
+        HtmlElement(_, attrs) =>
+            for a in attrs
+                let name = str.slice(doc.source, a.name.start, a.name.end)
+                if not list.contains(names, name)
+                    names = list.push(names, name)
+        _                     => ()
+    names = list.sort(names)
+    let pad = "| " + str.repeat("  ", level)
+    for name in names
+        lines = list.push(lines, pad + name + "=\"" + (htmltree.attr(doc, index, name) ?? "") + "\"")
+    lines
+
+// The document an input parses to, in a context or as a whole.
+fn parsed(input: Str, context: Str) -> HtmlDoc
+    if context == ""
+        return htmlparse.parse(input)
+    htmlparse.parse_fragment(input, context)
+
+// Rows 1 to 200.
+fn rows_0() -> [(Str, Str, Str)]
+    [
+        ("Test", "", "| \"Test\""),
+        ("<p>One<p>Two", "", "| <p>\n|   \"One\"\n| <p>\n|   \"Two\""),
+        ("Line1<br>Line2<br>Line3<br>Line4",
+        "",
+        "| \"Line1\"\n| <br>\n| \"Line2\"\n| <br>\n| \"Line3\"\n| <br>\n| \"Line4\""),
+        ("<h1>Hello<h2>World", "", "| <h1>\n|   \"Hello\"\n| <h2>\n|   \"World\""),
+        ("<!--><div>--<!-->", "", "| <!--  -->\n| <div>\n|   \"--\"\n|   <!--  -->"),
+        ("<p><hr></p>", "", "| <p>\n| <hr>\n| <p>"),
+        ("<", "", "| \"<\""),
+        ("<#", "", "| \"<#\""),
+        ("</", "", "| \"</\""),
+        ("</#", "", "| <!-- # -->"),
+        ("<!", "", "| <!--  -->"),
+        ("<!#", "", "| <!-- # -->"),
+        ("<!COMMENT>", "", "| <!-- COMMENT -->"),
+        ("</ COMMENT >", "", "| <!--  COMMENT  -->"),
+        ("<!COM--MENT>", "", "| <!-- COM--MENT -->"),
+        ("</ COM--MENT >", "", "| <!--  COM--MENT  -->"),
+        ("<p id=a><b><p id=b></b>TEST",
+        "",
+        "| <p>\n|   id=\"a\"\n|   <b>\n| <p>\n|   id=\"b\"\n|   \"TEST\""),
+        ("<b>Test</i>Test", "", "| <b>\n|   \"TestTest\""),
+        ("<b>A<cite>B<div>C",
+        "",
+        "| <b>\n|   \"A\"\n|   <cite>\n|     \"B\"\n|     <div>\n|       \"C\""),
+        ("<b>A<cite>B<div>C</cite>D",
+        "",
+        "| <b>\n|   \"A\"\n|   <cite>\n|     \"B\"\n|     <div>\n|       \"CD\""),
+        ("", "", ""),
+        ("<DIV>", "", "| <div>"),
+        ("<DIV> abc", "", "| <div>\n|   \" abc\""),
+        ("<DIV> abc <B>", "", "| <div>\n|   \" abc \"\n|   <b>"),
+        ("<DIV> abc <B> def", "", "| <div>\n|   \" abc \"\n|   <b>\n|     \" def\""),
+        ("<DIV> abc <B> def <I>", "", "| <div>\n|   \" abc \"\n|   <b>\n|     \" def \"\n|     <i>"),
+        ("<DIV> abc <B> def <I> ghi",
+        "",
+        "| <div>\n|   \" abc \"\n|   <b>\n|     \" def \"\n|     <i>\n|       \" ghi\""),
+        ("<DIV> abc <B> def <I> ghi <P>",
+        "",
+        "| <div>\n|   \" abc \"\n|   <b>\n|     \" def \"\n|     <i>\n|       \" ghi \"\n|       <p>"),
+        ("<DIV> abc <B> def <I> ghi <P> jkl",
+        "",
+        "| <div>\n|   \" abc \"\n|   <b>\n|     \" def \"\n|     <i>\n|       \" ghi \"\n|       <p>\n|         \" jkl\""),
+        ("<test attribute---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------->",
+        "",
+        "| <test>\n|   attribute----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------=\"\""),
+        ("<a href=a>aa<marquee>aa<a href=b>bb</marquee>aa",
+        "",
+        "| <a>\n|   href=\"a\"\n|   \"aa\"\n|   <marquee>\n|     \"aa\"\n|     <a>\n|       href=\"b\"\n|       \"bb\"\n|   \"aa\""),
+        ("<!DOCTYPE html><spacer>foo", "", "| <!DOCTYPE html>\n| <spacer>\n|   \"foo\""),
+        ("<textarea><p></textarea>", "", "| <textarea>\n|   \"<p>\""),
+        ("<h1><h2>", "", "| <h1>\n| <h2>"),
+        ("<ul><li></li><div><li></div><li><li><div><li><address><li><b><em></b><li></ul>",
+        "",
+        "| <ul>\n|   <li>\n|   <div>\n|     <li>\n|   <li>\n|   <li>\n|     <div>\n|   <li>\n|     <address>\n|   <li>\n|     <b>\n|       <em>\n|   <li>"),
+        ("<ul><li><ul></li><li>a</li></ul></li></ul>",
+        "",
+        "| <ul>\n|   <li>\n|     <ul>\n|       <li>\n|         \"a\""),
+        ("<!DOCTYPE html>Test", "", "| <!DOCTYPE html>\n| \"Test\""),
+        ("<textarea>test</div>test", "", "| <textarea>\n|   \"test</div>test\""),
+        ("<!DOCTYPE html><dt><div><dd>", "", "| <!DOCTYPE html>\n| <dt>\n|   <div>\n| <dd>"),
+        ("<plaintext></plaintext>", "", "| <plaintext>\n|   \"</plaintext>\""),
+        ("</b test", "", ""),
+        ("<!DOCTYPE html></b test<b &=&amp>X", "", "| <!DOCTYPE html>\n| \"X\""),
+        ("&", "", "| \"&\""),
+        ("&#", "", "| \"&#\""),
+        ("&#X", "", "| \"&#X\""),
+        ("&#x", "", "| \"&#x\""),
+        ("&#45", "", "| \"-\""),
+        ("&x-test", "", "| \"&x-test\""),
+        ("<!doctypehtml><p><li>", "", "| <!DOCTYPE html>\n| <p>\n| <li>"),
+        ("<!doctypehtml><p><dt>", "", "| <!DOCTYPE html>\n| <p>\n| <dt>"),
+        ("<!doctypehtml><p><dd>", "", "| <!DOCTYPE html>\n| <p>\n| <dd>"),
+        ("<!DOCTYPE html><p></P>X", "", "| <!DOCTYPE html>\n| <p>\n| \"X\""),
+        ("&AMP", "", "| \"&\""),
+        ("&AMp;", "", "| \"&AMp;\""),
+        ("<!DOCTYPE html><!-- X", "", "| <!DOCTYPE html>\n| <!--  X -->"),
+        ("<!DOCTYPE html><datalist><option>foo</datalist>bar",
+        "",
+        "| <!DOCTYPE html>\n| <datalist>\n|   <option>\n|     \"foo\"\n| \"bar\""),
+        ("<!DOCTYPE html><font><input><input></font>",
+        "",
+        "| <!DOCTYPE html>\n| <font>\n|   <input>\n|   <input>"),
+        ("<!DOCTYPE html><!-- XXX - XXX -->", "", "| <!DOCTYPE html>\n| <!--  XXX - XXX  -->"),
+        ("<!DOCTYPE html><!-- XXX - XXX", "", "| <!DOCTYPE html>\n| <!--  XXX - XXX -->"),
+        ("<!DOCTYPE html><!-- XXX - XXX - XXX -->",
+        "",
+        "| <!DOCTYPE html>\n| <!--  XXX - XXX - XXX  -->"),
+        ("<!DOCTYPE html> <!DOCTYPE html>", "", "| <!DOCTYPE html>"),
+        ("test\ntest", "", "| \"test\ntest\""),
+        (" \n ", "", ""),
+        ("<!DOCTYPE html>X<p/x/y/z>",
+        "",
+        "| <!DOCTYPE html>\n| \"X\"\n| <p>\n|   x=\"\"\n|   y=\"\"\n|   z=\"\""),
+        ("<!DOCTYPE html><!--x--", "", "| <!DOCTYPE html>\n| <!-- x -->"),
+        ("<!DOCTYPE <!DOCTYPE HTML>><!--<!--x-->-->",
+        "",
+        "| <!DOCTYPE <!doctype>\n| \">\"\n| <!-- <!--x -->\n| \"-->\""),
+        ("<!DOCTYPE html><pre>&#x0a;&#x0a;A</pre>", "", "| <!DOCTYPE html>\n| <pre>\n|   \"\nA\""),
+        ("<textarea>foo<span>bar</span><i>baz", "", "| <textarea>\n|   \"foo<span>bar</span><i>baz\""),
+        ("<!DOCTYPE html><textarea>\n</textarea>", "", "| <!DOCTYPE html>\n| <textarea>"),
+        ("<!DOCTYPE html><textarea>\nfoo</textarea>",
+        "",
+        "| <!DOCTYPE html>\n| <textarea>\n|   \"foo\""),
+        ("<!DOCTYPE html><textarea>\n\nfoo</textarea>",
+        "",
+        "| <!DOCTYPE html>\n| <textarea>\n|   \"\nfoo\""),
+        ("<iframe> <!---> </iframe>x", "", "| <iframe>\n|   \" <!---> \"\n| \"x\""),
+        ("<iframe> <!--- </iframe>->x</iframe> --> </iframe>x",
+        "",
+        "| <iframe>\n|   \" <!--- \"\n| \"->x --> x\""),
+        ("<textarea> <!--- </textarea>->x</textarea> --> </textarea>x",
+        "",
+        "| <textarea>\n|   \" <!--- \"\n| \"->x --> x\""),
+        ("<p><xmp></xmp>", "", "| <p>\n| <xmp>"),
+        ("<xmp> <!-- > --> </xmp>", "", "| <xmp>\n|   \" <!-- > --> \""),
+        ("<!doctype>", "", "| <!DOCTYPE >"),
+        ("<!---x", "", "| <!-- -x -->"),
+        ("<!doctype html><p><applet><p>X</p></applet>",
+        "",
+        "| <!DOCTYPE html>\n| <p>\n|   <applet>\n|     <p>\n|       \"X\""),
+        ("<!doctype html><p><object type=\"application/x-non-existant-plugin\"><p>X</p></object>",
+        "",
+        "| <!DOCTYPE html>\n| <p>\n|   <object>\n|     type=\"application/x-non-existant-plugin\"\n|     <p>\n|       \"X\""),
+        ("<!doctype html><listing>\nX</listing>", "", "| <!DOCTYPE html>\n| <listing>\n|   \"X\""),
+        ("<div><p>a</x> b", "", "| <div>\n|   <p>\n|     \"a b\""),
+        ("<div>x<div></div>\n</span>x", "", "| <div>\n|   \"x\"\n|   <div>\n|   \"\nx\""),
+        ("<div>x<div></div>x</span>x", "", "| <div>\n|   \"x\"\n|   <div>\n|   \"xx\""),
+        ("<div>x<div></div>y</span>z", "", "| <div>\n|   \"x\"\n|   <div>\n|   \"yz\""),
+        ("FOO&gt;BAR", "", "| \"FOO>BAR\""),
+        ("FOO&gtBAR", "", "| \"FOO>BAR\""),
+        ("FOO&gt BAR", "", "| \"FOO> BAR\""),
+        ("FOO&gt;;;BAR", "", "| \"FOO>;;BAR\""),
+        ("I'm &notit; I tell you", "", "| \"I'm \u{ac}it; I tell you\""),
+        ("I'm &notin; I tell you", "", "| \"I'm \u{2209} I tell you\""),
+        ("&ammmp;", "", "| \"&ammmp;\""),
+        ("&ammmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmp;",
+        "",
+        "| \"&ammmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmp;\""),
+        ("FOO& BAR", "", "| \"FOO& BAR\""),
+        ("FOO&<BAR>", "", "| \"FOO&\"\n| <bar>"),
+        ("FOO&&&&gt;BAR", "", "| \"FOO&&&>BAR\""),
+        ("FOO&#41;BAR", "", "| \"FOO)BAR\""),
+        ("FOO&#x41;BAR", "", "| \"FOOABAR\""),
+        ("FOO&#X41;BAR", "", "| \"FOOABAR\""),
+        ("FOO&#BAR", "", "| \"FOO&#BAR\""),
+        ("FOO&#ZOO", "", "| \"FOO&#ZOO\""),
+        ("FOO&#xBAR", "", "| \"FOO\u{ba}R\""),
+        ("FOO&#xZOO", "", "| \"FOO&#xZOO\""),
+        ("FOO&#XZOO", "", "| \"FOO&#XZOO\""),
+        ("FOO&#41BAR", "", "| \"FOO)BAR\""),
+        ("FOO&#x41BAR", "", "| \"FOO\u{41ba}R\""),
+        ("FOO&#x41ZOO", "", "| \"FOOAZOO\""),
+        ("FOO&#x0000;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#x0078;ZOO", "", "| \"FOOxZOO\""),
+        ("FOO&#x0079;ZOO", "", "| \"FOOyZOO\""),
+        ("FOO&#x0080;ZOO", "", "| \"FOO\u{20ac}ZOO\""),
+        ("FOO&#x0081;ZOO", "", "| \"FOO\u{81}ZOO\""),
+        ("FOO&#x0082;ZOO", "", "| \"FOO\u{201a}ZOO\""),
+        ("FOO&#x0083;ZOO", "", "| \"FOO\u{192}ZOO\""),
+        ("FOO&#x0084;ZOO", "", "| \"FOO\u{201e}ZOO\""),
+        ("FOO&#x0085;ZOO", "", "| \"FOO\u{2026}ZOO\""),
+        ("FOO&#x0086;ZOO", "", "| \"FOO\u{2020}ZOO\""),
+        ("FOO&#x0087;ZOO", "", "| \"FOO\u{2021}ZOO\""),
+        ("FOO&#x0088;ZOO", "", "| \"FOO\u{2c6}ZOO\""),
+        ("FOO&#x0089;ZOO", "", "| \"FOO\u{2030}ZOO\""),
+        ("FOO&#x008A;ZOO", "", "| \"FOO\u{160}ZOO\""),
+        ("FOO&#x008B;ZOO", "", "| \"FOO\u{2039}ZOO\""),
+        ("FOO&#x008C;ZOO", "", "| \"FOO\u{152}ZOO\""),
+        ("FOO&#x008D;ZOO", "", "| \"FOO\u{8d}ZOO\""),
+        ("FOO&#x008E;ZOO", "", "| \"FOO\u{17d}ZOO\""),
+        ("FOO&#x008F;ZOO", "", "| \"FOO\u{8f}ZOO\""),
+        ("FOO&#x0090;ZOO", "", "| \"FOO\u{90}ZOO\""),
+        ("FOO&#x0091;ZOO", "", "| \"FOO\u{2018}ZOO\""),
+        ("FOO&#x0092;ZOO", "", "| \"FOO\u{2019}ZOO\""),
+        ("FOO&#x0093;ZOO", "", "| \"FOO\u{201c}ZOO\""),
+        ("FOO&#x0094;ZOO", "", "| \"FOO\u{201d}ZOO\""),
+        ("FOO&#x0095;ZOO", "", "| \"FOO\u{2022}ZOO\""),
+        ("FOO&#x0096;ZOO", "", "| \"FOO\u{2013}ZOO\""),
+        ("FOO&#x0097;ZOO", "", "| \"FOO\u{2014}ZOO\""),
+        ("FOO&#x0098;ZOO", "", "| \"FOO\u{2dc}ZOO\""),
+        ("FOO&#x0099;ZOO", "", "| \"FOO\u{2122}ZOO\""),
+        ("FOO&#x009A;ZOO", "", "| \"FOO\u{161}ZOO\""),
+        ("FOO&#x009B;ZOO", "", "| \"FOO\u{203a}ZOO\""),
+        ("FOO&#x009C;ZOO", "", "| \"FOO\u{153}ZOO\""),
+        ("FOO&#x009D;ZOO", "", "| \"FOO\u{9d}ZOO\""),
+        ("FOO&#x009E;ZOO", "", "| \"FOO\u{17e}ZOO\""),
+        ("FOO&#x009F;ZOO", "", "| \"FOO\u{178}ZOO\""),
+        ("FOO&#x00A0;ZOO", "", "| \"FOO\u{a0}ZOO\""),
+        ("FOO&#xD7FF;ZOO", "", "| \"FOO\u{d7ff}ZOO\""),
+        ("FOO&#xD800;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#xD801;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#xDFFE;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#xDFFF;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#xE000;ZOO", "", "| \"FOO\u{e000}ZOO\""),
+        ("FOO&#x10FFFE;ZOO", "", "| \"FOO\u{10fffe}ZOO\""),
+        ("FOO&#x1087D4;ZOO", "", "| \"FOO\u{1087d4}ZOO\""),
+        ("FOO&#x10FFFF;ZOO", "", "| \"FOO\u{10ffff}ZOO\""),
+        ("FOO&#x110000;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#xFFFFFF;ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#11111111111", "", "| \"FOO\u{fffd}\""),
+        ("FOO&#1111111111", "", "| \"FOO\u{fffd}\""),
+        ("FOO&#111111111111", "", "| \"FOO\u{fffd}\""),
+        ("FOO&#11111111111ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#1111111111ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("FOO&#111111111111ZOO", "", "| \"FOO\u{fffd}ZOO\""),
+        ("<div bar=\"ZZ&gt;YY\"></div>", "", "| <div>\n|   bar=\"ZZ>YY\""),
+        ("<div bar=\"ZZ&\"></div>", "", "| <div>\n|   bar=\"ZZ&\""),
+        ("<div bar='ZZ&'></div>", "", "| <div>\n|   bar=\"ZZ&\""),
+        ("<div bar=ZZ&></div>", "", "| <div>\n|   bar=\"ZZ&\""),
+        ("<div bar=\"ZZ&gt=YY\"></div>", "", "| <div>\n|   bar=\"ZZ&gt=YY\""),
+        ("<div bar=\"ZZ&gt0YY\"></div>", "", "| <div>\n|   bar=\"ZZ&gt0YY\""),
+        ("<div bar=\"ZZ&gt9YY\"></div>", "", "| <div>\n|   bar=\"ZZ&gt9YY\""),
+        ("<div bar=\"ZZ&gtaYY\"></div>", "", "| <div>\n|   bar=\"ZZ&gtaYY\""),
+        ("<div bar=\"ZZ&gtZYY\"></div>", "", "| <div>\n|   bar=\"ZZ&gtZYY\""),
+        ("<div bar=\"ZZ&gt YY\"></div>", "", "| <div>\n|   bar=\"ZZ> YY\""),
+        ("<div bar=\"ZZ&gt\"></div>", "", "| <div>\n|   bar=\"ZZ>\""),
+        ("<div bar='ZZ&gt'></div>", "", "| <div>\n|   bar=\"ZZ>\""),
+        ("<div bar=ZZ&gt></div>", "", "| <div>\n|   bar=\"ZZ>\""),
+        ("<div bar=\"ZZ&pound_id=23\"></div>", "", "| <div>\n|   bar=\"ZZ\u{a3}_id=23\""),
+        ("<div bar=\"ZZ&prod_id=23\"></div>", "", "| <div>\n|   bar=\"ZZ&prod_id=23\""),
+        ("<div bar=\"ZZ&pound;_id=23\"></div>", "", "| <div>\n|   bar=\"ZZ\u{a3}_id=23\""),
+        ("<div bar=\"ZZ&prod;_id=23\"></div>", "", "| <div>\n|   bar=\"ZZ\u{220f}_id=23\""),
+        ("<div bar=\"ZZ&pound=23\"></div>", "", "| <div>\n|   bar=\"ZZ&pound=23\""),
+        ("<div bar=\"ZZ&prod=23\"></div>", "", "| <div>\n|   bar=\"ZZ&prod=23\""),
+        ("<div>ZZ&pound_id=23</div>", "", "| <div>\n|   \"ZZ\u{a3}_id=23\""),
+        ("<div>ZZ&prod_id=23</div>", "", "| <div>\n|   \"ZZ&prod_id=23\""),
+        ("<div>ZZ&pound;_id=23</div>", "", "| <div>\n|   \"ZZ\u{a3}_id=23\""),
+        ("<div>ZZ&prod;_id=23</div>", "", "| <div>\n|   \"ZZ\u{220f}_id=23\""),
+        ("<div>ZZ&pound=23</div>", "", "| <div>\n|   \"ZZ\u{a3}=23\""),
+        ("<div>ZZ&prod=23</div>", "", "| <div>\n|   \"ZZ&prod=23\""),
+        ("<div>ZZ&AElig=</div>", "", "| <div>\n|   \"ZZ\u{c6}=\""),
+        ("FOO<!-- BAR -->BAZ", "", "| \"FOO\"\n| <!--  BAR  -->\n| \"BAZ\""),
+        ("FOO<!-- BAR --!>BAZ", "", "| \"FOO\"\n| <!--  BAR  -->\n| \"BAZ\""),
+        ("FOO<!-- BAR --! >BAZ", "", "| \"FOO\"\n| <!--  BAR --! >BAZ -->"),
+        ("FOO<!-- BAR --!\n>BAZ", "", "| \"FOO\"\n| <!--  BAR --!\n>BAZ -->"),
+        ("FOO<!-- BAR --   >BAZ", "", "| \"FOO\"\n| <!--  BAR --   >BAZ -->"),
+        ("FOO<!-- BAR -- <QUX> -- MUX -->BAZ",
+        "",
+        "| \"FOO\"\n| <!--  BAR -- <QUX> -- MUX  -->\n| \"BAZ\""),
+        ("FOO<!-- BAR -- <QUX> -- MUX --!>BAZ",
+        "",
+        "| \"FOO\"\n| <!--  BAR -- <QUX> -- MUX  -->\n| \"BAZ\""),
+        ("FOO<!-- BAR -- <QUX> -- MUX -- >BAZ",
+        "",
+        "| \"FOO\"\n| <!--  BAR -- <QUX> -- MUX -- >BAZ -->"),
+        ("FOO<!---->BAZ", "", "| \"FOO\"\n| <!--  -->\n| \"BAZ\""),
+        ("FOO<!--->BAZ", "", "| \"FOO\"\n| <!--  -->\n| \"BAZ\""),
+        ("FOO<!-->BAZ", "", "| \"FOO\"\n| <!--  -->\n| \"BAZ\""),
+        ("FOO<!----->BAZ", "", "| \"FOO\"\n| <!-- - -->\n| \"BAZ\""),
+        ("<!DOCTYPE html>Hello", "", "| <!DOCTYPE html>\n| \"Hello\""),
+        ("<!dOctYpE HtMl>Hello", "", "| <!DOCTYPE html>\n| \"Hello\"")]
+
+@test
+fn test_html5lib_tree_rows_0() [io]
+    var n = 0
+    for row in rows_0()
+        let (input, context, want) = row
+        n = n + 1
+        test.case("row ${n}")
+        test.assert_eq_str(dump(parsed(input, context)), want)
+
+// Rows 201 to 219.
+fn rows_1() -> [(Str, Str, Str)]
+    [
+        ("<!DOCTYPEhtml>Hello", "", "| <!DOCTYPE html>\n| \"Hello\""),
+        ("<!DOCTYPE>Hello", "", "| <!DOCTYPE >\n| \"Hello\""),
+        ("<!DOCTYPE >Hello", "", "| <!DOCTYPE >\n| \"Hello\""),
+        ("<!DOCTYPE potato>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato >Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato taco>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato taco \"ddd>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato sYstEM>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato sYstEM    >Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE   potato       sYstEM  ggg>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato SYSTEM taco  >Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato SYSTEMtaco \"ddd\">Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato grass SYSTEM taco>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato pUbLIc>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato pUbLIc >Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato pUbLIcgoof>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE potato PUBLIC goof>Hello", "", "| <!DOCTYPE potato>\n| \"Hello\""),
+        ("<!DOCTYPE ...>Hello", "", "| <!DOCTYPE ...>\n| \"Hello\""),
+        ("<!DOCTYPE root-element [SYSTEM OR PUBLIC FPI] \"uri\" [ \n<!-- internal declarations -->\n]>",
+        "",
+        "| <!DOCTYPE root-element>\n| \"]>\"")]
+
+@test
+fn test_html5lib_tree_rows_1() [io]
+    var n = 200
+    for row in rows_1()
+        let (input, context, want) = row
+        n = n + 1
+        test.case("row ${n}")
+        test.assert_eq_str(dump(parsed(input, context)), want)
+
+// The inputs whose trees depend on the adoption agency algorithm.
+fn misnested() -> [Str]
+    [
+        "<a><p>X<a>Y</a>Z</p></a>",
+        "<p><b><div><marquee></p></b></div>X",
+        "<a X>0<b>1<a Y>2",
+        "<b><p></b>TEST",
+        "<b id=a><p><b id=b></p></b>TEST",
+        "<font><p>hello<b>cruel</font>world",
+        "<b>A<cite>B<div>C</b>D",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B>",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B> mno",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B> mno </I>",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B> mno </I> pqr",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B> mno </I> pqr </P>",
+        "<DIV> abc <B> def <I> ghi <P> jkl </B> mno </I> pqr </P> stu",
+        "<wbr><strike><code></strike><code><strike></code>",
+        "<a><p><a></a></p></a>",
+        "<p><b><div><marquee></p></b></div>",
+        "<!DOCTYPE html><font><p><b>test</font>",
+        "<b>a<div></div><div></b>y",
+        "<a><div><p></a>"]
+
+// Whether a document reports a construct outside the subset.
+fn reports_unsupported(doc: HtmlDoc) -> Bool
+    for issue in doc.issues
+        match issue.kind
+            IssueUnsupportedConstruct(_) =>
+                return true
+            _                            => ()
+    false
+
+@test
+fn test_each_misnested_case_is_reported_rather_than_repaired() [io]
+    for input in misnested()
+        test.case(input)
+        test.assert(reports_unsupported(htmlparse.parse(input)))

@@ -1,0 +1,198 @@
+// tests/htmledge_tests.nv — the edges of the lookups, the selectors,
+// the writer, the sanitiser and the references.
+
+use std.test
+use std.str
+use htmlparse
+use htmltree
+use htmlquery
+use htmlwrite
+use htmlsafe
+use htmlentity
+
+// The error a selector compiles to, as its message.
+fn refusal(selector: Str) -> Str
+    match htmlquery.compile(selector)
+        Ok(_)  => "compiled"
+        Err(e) => e.message()
+
+// The nodes a selector selects in a fragment, as their tag names.
+fn picked(source: Str, selector: Str) -> Str
+    let doc = htmlparse.parse_fragment(source, "div")
+    match htmlquery.compile(selector)
+        Ok(s)  => str.join(list.map(htmlquery.select_all(doc, 0, s),
+            i => htmltree.tag_name(doc, i) + (htmltree.attr(doc, i, "id") ?? "")),
+        " ")
+        Err(e) => e.message()
+
+@test
+fn test_every_selector_refusal_names_its_byte() [io]
+    test.assert_eq_str(refusal("a >"), "byte 3: the selector ends too soon")
+    test.assert_eq_str(refusal("a)"), "byte 1: unexpected )")
+    test.assert_eq_str(refusal("svg|rect"), "byte 3: a namespace is not supported")
+    test.assert_eq_str(refusal("a.#"), "byte 2: unexpected #")
+    test.assert_eq_str(refusal("[=x]"), "byte 1: unexpected =")
+    test.assert_eq_str(refusal("[a|b]"), "byte 2: a namespace is not supported")
+    test.assert_eq_str(refusal("[a!]"), "byte 2: ! is not an attribute operator")
+    test.assert_eq_str(refusal("[a ="), "byte 0: [ is not closed")
+    test.assert_eq_str(refusal("[a=\"x\\\"]"), "byte 5: unexpected \\")
+    test.assert_eq_str(refusal("[a='x"), "byte 3: ' is not closed")
+    test.assert_eq_str(refusal("[a=]"), "byte 3: unexpected ]")
+    test.assert_eq_str(refusal("[a=x"), "byte 0: [ is not closed")
+    test.assert_eq_str(refusal("[a=x y]"), "byte 5: unexpected y")
+    test.assert_eq_str(refusal("[a"), "byte 0: [ is not closed")
+    test.assert_eq_str(refusal("[a=x"), "byte 0: [ is not closed")
+    test.assert_eq_str(refusal("["), "byte 0: [ is not closed")
+    test.assert_eq_str(refusal(":"), "byte 1: the selector ends too soon")
+    test.assert_eq_str(refusal("p::before"), "byte 1: ::before is not supported")
+    test.assert_eq_str(refusal(""), "byte 0: an empty selector")
+    test.assert_eq_str(refusal("a:Hover"), "byte 1: :hover is not supported")
+
+@test
+fn test_every_supported_selector_selects() [io]
+    let page = "<ul id=u><li id=1 class='a b'>x</li><li id=2 lang=en-GB>y</li><li id=3></li><!-- c --></ul><p id=4></p>"
+    test.assert_eq_str(picked(page, "li:first-child"), "li1")
+    test.assert_eq_str(picked(page, "li:last-child"), "li3")
+    test.assert_eq_str(picked(page, "ul:only-child, li:only-child"), "")
+    test.assert_eq_str(picked(page, "li:empty"), "li3")
+    test.assert_eq_str(picked(page, ":root"), "ulu p4")
+    test.assert_eq_str(picked(page, "[class~=b]"), "li1")
+    test.assert_eq_str(picked(page, "[lang|=en]"), "li2")
+    test.assert_eq_str(picked(page, "[lang|=en-GB]"), "li2")
+    test.assert_eq_str(picked(page, "[lang^='']"), "")
+    test.assert_eq_str(picked(page, "LI#2"), "li2")
+    test.assert_eq_str(picked(page, "li ~ li"), "li2 li3")
+    test.assert_eq_str(picked(page, "li + li"), "li2 li3")
+    test.assert_eq_str(picked(page, "p ~ li"), "")
+    test.assert_eq_str(picked(page, "div li"), "")
+    test.assert_eq_str(picked(page, "#1 ~ #3"), "li3")
+    test.assert_eq_str(picked(page, "[id=\"4\"]"), "p4")
+    test.assert_eq_str(picked(page, "* > li[id=\"3\"]:empty"), "li3")
+
+@test
+fn test_the_lookups_on_a_node_that_is_not_there() [io]
+    let doc = htmlparse.parse("<p>a</p><!--c-->")
+    match htmlquery.compile("p")
+        Ok(s)  =>
+            test.assert(not htmlquery.matches(doc, 0, s))
+            test.assert(not htmlquery.matches(doc, 99, s))
+            test.assert(htmlquery.select(doc, 0, htmlquery.compile("em")!) == NO_NODE)
+            test.assert(list.len(htmlquery.select_all(doc, 99, s)) == 0)
+            test.assert(htmlquery.closest(doc, 99, s) == NO_NODE)
+        Err(e) => test.fail(e.message())
+    test.assert(htmltree.node(doc, -1) == None)
+    test.assert(list.len(htmltree.children(doc, 42)) == 0)
+    test.assert_eq_str(htmltree.tag_name(doc, 3), "")
+    test.assert_eq_str(htmltree.tag_name(doc, 42), "")
+    test.assert(htmltree.attr(doc, 42, "x") == None)
+    test.assert(htmltree.attr(doc, 3, "x") == None)
+    test.assert_eq_str(htmltree.text_of(doc, 1), "")
+    test.assert_eq_str(htmltree.text_of(doc, 42), "")
+    test.assert(htmlquery.by_id(doc, 0, "none") == NO_NODE)
+
+@test
+fn test_the_tree_answers_about_names_and_text() [io]
+    let doc = htmlparse.parse("<div TITLE='T'>a<p>b<script>x</script><em>c</em></p></div>")
+    test.assert(htmltree.attr(doc, 1, "Title") == Some("T"))
+    test.assert(htmltree.attr(doc, 1, "tit") == None)
+    test.assert_eq_str(htmltree.inner_text(doc, 1), "abc")
+    for tag in ["area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "source",
+    "track",
+    "wbr"]
+        test.assert(htmltree.is_void(tag))
+    for tag in ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext"]
+        test.assert(htmltree.is_raw_text(tag))
+    test.assert(htmltree.childless("param"))
+
+@test
+fn test_the_writer_options() [io]
+    let doc = htmlparse.parse("<!DOCTYPE html><div a=\"x&amp;'<>\"><br><p>1 &gt; 0</p><!--c--> <pre>\n\nx</pre></div>")
+    let plain = htmlwrite.serialize_str(doc, htmlwrite.default_options())
+    test.assert_eq_str(plain,
+        "<!DOCTYPE html><div a=\"x&amp;&#39;&lt;&gt;\"><br><p>1 &gt; 0</p><!--c--> <pre>\n\nx</pre></div>")
+    let xhtml = HtmlWriteOptions { xhtml: true, doctype: true, comments: false, indent: 0 }
+    test.assert_eq_str(htmlwrite.serialize_str(doc, xhtml),
+        "<!DOCTYPE html><div a=\"x&amp;&#39;&lt;&gt;\"><br /><p>1 &gt; 0</p> <pre>\n\nx</pre></div>")
+    let pretty = htmlwrite.serialize_str(htmlparse.parse("<div><p>a</p> <p>b</p></div><p>c</p>"), htmlwrite.pretty_options())
+    test.assert_eq_str(pretty, "<div>\n  <p>a</p>\n  <p>b</p>\n</div>\n<p>c</p>")
+    let fresh = HtmlWriteOptions { xhtml: false, doctype: true, comments: true, indent: 2 }
+    test.assert_eq_str(htmlwrite.serialize_str(htmlparse.parse("x"), fresh), "<!DOCTYPE html>\nx")
+    test.assert(list.len(htmlwrite.serialize([1 as u8], doc, htmlwrite.default_options())) == 1 + str.len(plain))
+    let script = htmlparse.parse("<script>a<b</script>")
+    test.assert(bytes_text(htmlwrite.serialize_children([], script, 1, htmlwrite.default_options())) == "a<b")
+    let tags = htmlwrite.write_start_tag([], "BR", [HtmlWriteAttr { name: "a b>", value: "1" }], xhtml)
+    test.assert(bytes_text(tags) == "<BR ab=\"1\" />")
+    test.assert(bytes_text(htmlwrite.write_text([], "a>b")) == "a&gt;b")
+
+// The text of a byte list.
+fn bytes_text(bs: [u8]) -> Str
+    let sb = str.builder_new()
+    for b in bs
+        str.builder_append_char(sb, b as Int)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+@test
+fn test_the_sanitiser_edges() [io]
+    let allow = htmlsafe.allow_readme()
+    test.case("adding a tag already there changes nothing")
+    test.assert(list.len(htmlsafe.with_tag(allow, "p").tags) == list.len(allow.tags))
+    test.case("a URL with trailing spaces, a scheme-relative one, and none allowed")
+    test.assert(htmlsafe.safe_url("https://a.example/ ", allow) == Some("https://a.example/ "))
+    test.assert(htmlsafe.safe_url("//a.example/", allow) == Some("//a.example/"))
+    let mail_only = HtmlAllowList {
+        tags: ["a"], attrs: [HtmlAttrRule { tag: "*", attrs: ["href"], url_attrs: ["href"] }],
+        url_schemes: ["mailto"], allow_relative_urls: false, refused_url: "about:blank",
+        strip_contents_of: [], keep_comments: true, link_rel: "" }
+    test.assert(htmlsafe.safe_url("//a.example/", mail_only) == None)
+    test.assert(htmlsafe.safe_url("/docs", mail_only) == None)
+    test.assert(htmlsafe.safe_url("1http:x", mail_only) == None)
+    test.case("a policy that keeps comments and any element's href")
+    let doc = htmlparse.parse_fragment("<a href='java&#x73;cript:x' rel=me>a</a><!--k--><b>b</b>", "div")
+    let out = htmlwrite.serialize_str(htmlsafe.sanitize(doc, mail_only), htmlwrite.default_options())
+    test.assert_eq_str(out, "<a href=\"about:blank\">a</a><!--k-->b")
+    test.case("a rel written into a link that leaves the site, over the one it had")
+    let link = htmlparse.parse_fragment("<a href='https://e.example/?a=1&amp;b=2' rel='x'>t</a><a href='/in'>u</a>", "div")
+    test.assert_eq_str(htmlwrite.serialize_str(htmlsafe.sanitize(link, allow), htmlwrite.default_options()),
+        "<a href=\"https://e.example/?a=1&amp;b=2\" rel=\"nofollow noopener\">t</a><a href=\"/in\">u</a>")
+    test.case("the removals, a doctype among them")
+    let full = htmlparse.parse("<!DOCTYPE html><p>a</p><!--c--><font>x</font>")
+    test.assert(htmlsafe.sanitize_removals(full, allow) == [1, 4, 5])
+    test.case("a repeated attribute is kept once")
+    let twice = htmlparse.parse_fragment("<img src=/a src=/b>", "div")
+    test.assert_eq_str(htmlwrite.serialize_str(htmlsafe.sanitize(twice, allow), htmlwrite.default_options()),
+        "<img src=\"/a\">")
+    test.case("a named reference given with its semicolon, and nothing")
+    test.assert(htmlsafe.named_reference("amp;") != None)
+    test.assert(htmlsafe.named_reference("") == None)
+
+@test
+fn test_the_reference_edges() [io]
+    test.assert_eq_str(htmlsafe.unescape("&1x &#65 &#x42z &#9999999999; &#x80;"), "&1x A Bz \u{fffd} \u{20ac}")
+    test.assert_eq_str(htmlsafe.unescape("&ampx &notit; &#"), "&x ¬it; &#")
+    test.assert(htmlentity.line_feed_ref("&amp;", 0, 5) == 0)
+    test.assert(htmlentity.line_feed_ref("&#65;", 0, 5) == 0)
+    test.assert(htmlentity.codes_of("CounterClockwiseContourIntegralX;") == None)
+
+@test
+fn test_the_last_edges() [io]
+    test.assert_eq_str(refusal("[a\"x\"]"), "byte 2: unexpected \"")
+    test.assert_eq_str(picked("<p id=1>a</p>text<p id=2>b</p>", "p + p"), "p2")
+    test.assert_eq_str(picked("<i id=1><!--c--></i><i id=2>t</i>", "i:empty"), "i1")
+    test.assert(htmlsafe.safe_url("ja va:x", htmlsafe.allow_readme()) == Some("ja va:x"))
+    test.assert(htmlsafe.safe_url("page.html", htmlsafe.allow_readme()) == Some("page.html"))
+    let doc = htmlparse.parse("<div>a<!--c-->b<pre><b>x</b></pre></div>")
+    test.assert_eq_str(htmltree.inner_text(doc, 1), "abx")
+    test.assert_eq_str(htmlwrite.serialize_str(doc, htmlwrite.pretty_options()),
+        "<div>\n  a\n  <!--c-->\n  b\n  <pre><b>x</b></pre>\n</div>")

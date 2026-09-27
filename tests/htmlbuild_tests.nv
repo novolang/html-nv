@@ -1,0 +1,257 @@
+// tests/htmlbuild_tests.nv — the rules of tree construction this
+// package implements, one at a time, and the element lists of section
+// 13.2 they rest on.
+
+use std.test
+use std.str
+use htmlparse
+use htmltree
+use htmlwrite
+
+// A document's element tree as text: each element's tag and its
+// children in brackets, text as itself.
+fn shape(doc: HtmlDoc, index: Int) -> Str
+    var out = ""
+    for c in htmltree.children(doc, index)
+        match doc.nodes[c].kind
+            HtmlElement(_, _) =>
+                out = out + htmltree.tag_name(doc, c) + "(" + shape(doc, c) + ")"
+            HtmlText(_, _)    =>
+                out = out + htmltree.text_of(doc, c)
+            HtmlComment(_)    =>
+                out = out + "#"
+            _                 =>
+                out = out + "!"
+    out
+
+// The shape of a parsed document.
+fn tree(source: Str) -> Str
+    let doc = htmlparse.parse(source)
+    shape(doc, htmltree.root(doc))
+
+// The number of issues of each kind, as a string of letters: S stray
+// end tag, U unclosed, D duplicate id, R bad reference, X unsupported,
+// C self-closing.
+fn issue_letters(source: Str) -> Str
+    var out = ""
+    for issue in htmlparse.parse(source).issues
+        match issue.kind
+            IssueStrayEndTag(_)           =>
+                out = out + "S"
+            IssueUnclosedElement(_)       =>
+                out = out + "U"
+            IssueDuplicateId(_)           =>
+                out = out + "D"
+            IssueBadCharacterReference(_) =>
+                out = out + "R"
+            IssueUnsupportedConstruct(_)  =>
+                out = out + "X"
+            IssueSelfClosingNonVoid(_)    =>
+                out = out + "C"
+    out
+
+@test
+fn test_the_elements_that_close_an_open_paragraph() [io]
+    test.case("every tag in the list of section 13.2.6.4.7")
+    for tag in ["address", "article", "aside", "blockquote", "center", "details", "dialog", "dir",
+                "div", "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup",
+                "main", "menu", "nav", "ol", "p", "search", "section", "summary", "ul", "pre",
+                "listing", "form", "plaintext", "table", "hr", "xmp", "h1", "h6"]
+        test.assert(htmlparse.closes_p(tag))
+    test.assert(not htmlparse.closes_p("span"))
+    test.assert_eq_str(tree("<p>a<section>b</section>"), "p(a)section(b)")
+
+@test
+fn test_the_special_elements_and_the_optional_end_tags() [io]
+    test.case("special elements stop an end tag's search")
+    for tag in ["applet", "area", "base", "basefont", "bgsound", "body", "br", "button", "caption",
+                "col", "colgroup", "dd", "dt", "embed", "frame", "frameset", "head", "html",
+                "iframe", "img", "input", "keygen", "li", "link", "marquee", "meta", "noembed",
+                "noframes", "noscript", "object", "param", "script", "select", "source", "style",
+                "tbody", "td", "template", "textarea", "tfoot", "th", "thead", "title", "tr",
+                "track", "wbr", "div", "h2"]
+        test.assert(htmlparse.is_special(tag))
+    test.assert(not htmlparse.is_special("span"))
+    test.assert_eq_str(tree("<div><span>a</div>b"), "div(span(a))b")
+
+    test.case("an element whose end tag may be left out is not reported unclosed")
+    for tag in ["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc", "tbody",
+                "td", "tfoot", "th", "thead", "tr", "body", "html", "head", "colgroup"]
+        test.assert(htmlparse.end_optional(tag))
+    test.assert(not htmlparse.end_optional("div"))
+
+    test.case("generate implied end tags closes these")
+    for tag in ["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"]
+        test.assert(htmlparse.implied_end(tag))
+    test.assert(not htmlparse.implied_end("tr"))
+
+@test
+fn test_the_formatting_and_table_lists() [io]
+    test.case("the formatting elements")
+    for tag in ["a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"]
+        test.assert(htmlparse.is_formatting(tag))
+    test.assert(not htmlparse.is_formatting("span"))
+
+    test.case("what belongs inside a table without foster parenting")
+    for tag in ["caption",
+    "colgroup",
+    "col",
+    "tbody",
+    "thead",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
+    "script",
+    "style",
+    "template",
+    "form",
+    "input"]
+        test.assert(htmlparse.table_content(tag))
+    test.assert(not htmlparse.table_content("p"))
+
+    test.case("the scope boundaries")
+    for tag in ["applet", "caption", "html", "table", "td", "th", "marquee", "object", "template"]
+        test.assert(htmlparse.scope_boundary(tag, 0))
+    test.assert(htmlparse.scope_boundary("ul", 1))
+    test.assert(htmlparse.scope_boundary("button", 2))
+    test.assert(htmlparse.scope_boundary("table", 3))
+    test.assert(not htmlparse.scope_boundary("td", 3))
+
+    test.case("the end tags closed by scope")
+    for tag in ["address", "div", "button", "applet", "marquee", "object", "body", "html", "table",
+                "caption", "tbody", "thead", "tfoot", "tr", "td", "th"]
+        test.assert(htmlparse.closed_by_scope(tag))
+    test.assert(not htmlparse.closed_by_scope("hr"))
+    for tag in ["tbody", "thead", "tfoot", "tr", "td", "th", "table"]
+        test.assert(htmlparse.end_scope(tag) == 3)
+
+    test.case("the states a start tag switches the tokenizer to")
+    test.assert(htmlparse.state_after("noembed") == htmlparse.state_after("style"))
+    test.assert(htmlparse.state_after("noframes") == htmlparse.state_after("xmp"))
+    test.assert(htmlparse.context_state("noscript") == htmlparse.context_state("div"))
+
+@test
+fn test_list_items_definitions_and_options_close_their_siblings() [io]
+    test.case("an li closes the li it is in, through a div")
+    test.assert_eq_str(tree("<ul><li><div>a<li>b</ul>"), "ul(li(div(a))li(b))")
+    test.case("but not through a special element")
+    test.assert_eq_str(tree("<li><ul><li>a</ul>"), "li(ul(li(a)))")
+    test.case("dd and dt close each other")
+    test.assert_eq_str(tree("<dl><dt>a<dd>b<dt>c</dl>"), "dl(dt(a)dd(b)dt(c))")
+    test.case("an option or an optgroup closes an open option")
+    test.assert_eq_str(tree("<option>a<option>b<optgroup>c<option>d<optgroup>e"),
+        "option(a)option(b)optgroup(coption(d)optgroup(e))")
+    test.case("a button closes an open button")
+    test.assert_eq_str(tree("<button>a<button>b"), "button(a)button(b)")
+    test.case("a heading inside a heading closes it")
+    test.assert_eq_str(tree("<h1>a<h2>b</h2>"), "h1(a)h2(b)")
+
+@test
+fn test_table_cells_rows_and_sections_close_what_they_replace() [io]
+    test.assert_eq_str(tree("<table><tr><td>a<td>b<tr><th>c</table>"), "table(tr(td(a)td(b))tr(th(c)))")
+    test.assert_eq_str(tree("<table><thead><tr><td>a<tbody><tr><td>b<tfoot><tr><td>c</table>"),
+        "table(thead(tr(td(a)))tbody(tr(td(b)))tfoot(tr(td(c))))")
+    test.case("content between rows is reported, and stays where it was")
+    test.assert_eq_str(issue_letters("<table><tr>x<td>a</table>"), "X")
+    test.assert_eq_str(issue_letters("<table><p>x</p></table>"), "X")
+    test.assert_eq_str(issue_letters("<table> <tr><td>a</table>"), "")
+
+@test
+fn test_end_tags_close_by_the_rules_of_their_kind() [io]
+    test.case("an end tag of a void element is dropped, and </br> is a br")
+    test.assert_eq_str(tree("a</img>b</br>c"), "abbr()c")
+    test.assert_eq_str(issue_letters("a</img>b</br>c"), "SS")
+    test.case("</p> with no open p is an empty p")
+    test.assert_eq_str(tree("a</p>b"), "ap()b")
+    test.case("a heading's end tag closes any heading")
+    test.assert_eq_str(tree("<h1>a</h2>b"), "h1(a)b")
+    test.assert_eq_str(issue_letters("<table><td>a</h3>"), "SU")
+    test.assert_eq_str(issue_letters("a</h3>"), "S")
+    test.case("an end tag closed by scope, and one with nothing open")
+    test.assert_eq_str(tree("<div><p>a</div>b"), "div(p(a))b")
+    test.assert_eq_str(issue_letters("a</div>"), "S")
+    test.assert_eq_str(issue_letters("a</b>"), "S")
+    test.case("any other end tag walks down to its element")
+    test.assert_eq_str(tree("<span><em>a</span>b"), "span(em(a))b")
+    test.assert_eq_str(issue_letters("<span><em>a</span>b"), "X")
+    test.assert_eq_str(tree("<span><var>a</span>b"), "span(var(a))b")
+    test.assert_eq_str(issue_letters("<span><var>a</span>b"), "U")
+    test.assert_eq_str(issue_letters("<div><span>a</div></span>"), "US")
+    test.assert_eq_str(issue_letters("a</span>"), "S")
+
+@test
+fn test_the_recoveries_are_reported() [io]
+    test.case("a duplicate id")
+    test.assert_eq_str(issue_letters("<p id=a>1</p><p id='a'>2</p><p id=b>3</p>"), "D")
+    test.case("a bad reference in text and in a value")
+    test.assert_eq_str(issue_letters("<p title='&#0;'>&nosuch; &#x;</p>"), "RRR")
+    test.case("a self-closing slash on a div, and svg, math and template")
+    test.assert_eq_str(issue_letters("<div/></div><svg></svg><math></math><template></template>"), "CXXX")
+    test.case("a nested link")
+    test.assert_eq_str(issue_letters("<a>1<a>2</a></a>"), "X")
+    test.case("each recovery prints on its line")
+    let doc = htmlparse.parse("<div>\n<p id=a><p id=a>\n<b/></b>&#0;\n</x><svg></svg>")
+    var lines: [Str] = []
+    for issue in doc.issues
+        lines = list.push(lines, htmlparse.issue_text(doc, issue))
+    test.assert_eq_str(str.join(lines, "|"),
+        "line 2: the id \"a\" is used twice|line 3: <b/> is not a void element, so the slash is ignored|line 3: a character reference is not well-formed|line 4: </x> closes nothing and was dropped|line 4: \"svg\" needs a part of HTML's tree construction this parser does not implement|line 1: <div> was not closed")
+    test.assert(htmlparse.line_of(doc, 10000) == 4)
+
+@test
+fn test_the_limits_stop_the_parse() [io]
+    test.case("too many nodes")
+    let few = HtmlLimits { max_depth: 10, max_nodes: 3, max_attributes: 10 }
+    let a = htmlparse.parse_with("<p>a</p><p>b</p>", few)
+    test.assert(a.truncated)
+    test.assert(htmltree.count(a) == 3)
+    test.case("too many attributes on one element")
+    let narrow = HtmlLimits { max_depth: 10, max_nodes: 100, max_attributes: 1 }
+    test.assert(htmlparse.parse_with("<p a b>x</p>", narrow).truncated)
+    test.case("too deep")
+    let shallow = HtmlLimits { max_depth: 1, max_nodes: 100, max_attributes: 10 }
+    let d = htmlparse.parse_with("<div><div>x</div></div>", shallow)
+    test.assert(d.truncated)
+    test.assert(htmltree.count(d) == 2)
+
+@test
+fn test_the_document_rules() [io]
+    test.case("leading whitespace in a document is dropped, not in a fragment")
+    test.assert_eq_str(tree("  \n <p>a</p>"), "p(a)")
+    test.assert_eq_str(tree(" x"), "x")
+    let frag = htmlparse.parse_fragment("  <p>a</p>", "div")
+    test.assert_eq_str(shape(frag, 0), "  p(a)")
+    test.case("a doctype first, and none after, and none in a fragment")
+    test.assert_eq_str(tree("<!DOCTYPE html><!doctype html><p>a"), "!p(a)")
+    test.assert_eq_str(shape(htmlparse.parse_fragment("<!DOCTYPE html>a", "div"), 0), "a")
+    test.case("a line feed after pre is dropped, as a reference too, and not after a")
+    test.assert_eq_str(tree("<pre>\na</pre><pre>&#10;b</pre><pre>&NewLine;c</pre><pre>&amp;d</pre>"),
+        "pre(a)pre(b)pre(c)pre(&d)")
+    test.case("a comment anywhere")
+    test.assert_eq_str(tree("<!--a--><p>b<!--c--></p>"), "#p(b#)")
+    test.case("a fragment in a list")
+    test.assert_eq_str(shape(htmlparse.parse_fragment("<li>a<li>b", "ul"), 0), "li(a)li(b)")
+
+@test
+fn test_the_tokenizer_edges() [io]
+    test.case("a tokenizer walks to the end and then answers nothing")
+    var t = htmlparse.tokenizer("<noembed><p></noembed><noframes><p></noframes>")
+    var n = 0
+    var more = true
+    while more
+        match htmlparse.next_token(t)
+            Some(step) =>
+                n = n + 1
+                t = step.tokenizer
+            None       =>
+                more = false
+    test.assert(n == 7)
+    test.assert(htmlparse.next_token(t) == None)
+    test.case("tokenizer_in with a noscript context is the data state")
+    match htmlparse.next_token(htmlparse.tokenizer_in("<b>", "NOSCRIPT"))
+        Some(step) =>
+            match step.token.kind
+                TokenStartTag(_, _, _) => test.assert(true)
+                _                      => test.fail("markup inside noscript")
+        None       => test.fail("a token")

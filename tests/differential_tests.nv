@@ -1,0 +1,386 @@
+// tests/differential_tests.nv — this package's tokenizer against
+// Python's `html.parser`, over 150 generated documents.
+//
+// Written by tools/differential.py; do not edit by hand.  Each row is a
+// document and the tokens Python reads from it: `D` a doctype's name,
+// `S` a start tag with `|name=value` for each attribute, `E` an end
+// tag, `M` a comment and `C` text, references resolved, separated by
+// U+0001.  The documents keep to what both tokenizers read the same
+// way; the script's docstring says what that leaves out.
+
+use std.test
+use std.str
+use htmlparse
+use htmltree
+use htmlentity
+
+// The tokens of a document, in the form Python's are written.
+fn tokens_text(source: Str) -> Str
+    var t = htmlparse.tokenizer(source)
+    var items: [Str] = []
+    var chars = ""
+    var in_chars = false
+    var more = true
+    while more
+        match htmlparse.next_token(t)
+            None       =>
+                more = false
+            Some(step) =>
+                t = step.tokenizer
+                let src = t.source
+                match step.token.kind
+                    TokenCharacters(r, refs) =>
+                        chars = chars + decoded(src, r, refs, false)
+                        in_chars = true
+                    kind                     =>
+                        if in_chars
+                            items = list.push(items, "C" + chars)
+                            chars = ""
+                            in_chars = false
+                        match kind
+                            TokenDoctype(name)            =>
+                                items = list.push(items, "D" + slice(src, name))
+                            TokenStartTag(name, attrs, _) =>
+                                items = list.push(items, start_text(src, name, attrs))
+                            TokenEndTag(name)             =>
+                                items = list.push(items, "E" + slice(src, name))
+                            TokenComment(r)               =>
+                                items = list.push(items, "M" + slice(src, r))
+                            _                             => ()
+    if in_chars
+        items = list.push(items, "C" + chars)
+    str.join(items, "\u{1}")
+
+// A start tag's text, the first of a repeated attribute kept.
+fn start_text(src: Str, name: HtmlRange, attrs: [HtmlAttr]) -> Str
+    var out = "S" + slice(src, name)
+    var seen: [Str] = []
+    for a in attrs
+        let key = slice(src, a.name)
+        if not list.contains(seen, key)
+            seen = list.push(seen, key)
+            out = out + "|" + key + "=" + decoded(src, a.value, a.needs_decoding, true)
+    out
+
+// The text of a range.
+fn slice(src: Str, r: HtmlRange) -> Str
+    str.slice(src, r.start, r.end)
+
+// The decoded text of a range.
+fn decoded(src: Str, r: HtmlRange, refs: Bool, in_attr: Bool) -> Str
+    if refs
+        return htmlentity.decode_scan(src, r.start, r.end, in_attr).text
+    slice(src, r)
+
+// The documents and Python's tokens.
+fn rows() -> [(Str, Str)]
+    [
+        ("<!DOCTYPE html><span alt=a&amp;b><span HREF=a&amp;b><img HREF='alpha' class='caf\u{e9}'></span></span><span><section><style>p > a { color: red }</style></section><script>if (a < b && c > d) { x = \"</p>\"; }</script>&gt;it's&quot;</span>",
+        "Dhtml\u{1}Sspan|alt=a&b\u{1}Sspan|href=a&b\u{1}Simg|href=alpha|class=caf\u{e9}\u{1}Espan\u{1}Espan\u{1}Sspan\u{1}Ssection\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Esection\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C>it's\"\u{1}Espan"),
+        ("<!DOCTYPE html><section id='&gt;'><input/><section alt='x &lt; y'><!-- a -- b --><a alt=\"&#x263A;&quot;&eacute;\" class=plain><!-- <p> -->a &gt; ba &gt; balpha</a></section>betait's</section>&quot;&amp;x &lt; y&quot;&quot;\n",
+        "Dhtml\u{1}Ssection|id=>\u{1}Sinput\u{1}Ssection|alt=x < y\u{1}M a -- b \u{1}Sa|alt=\u{263a}\"\u{e9}|class=plain\u{1}M <p> \u{1}Ca > ba > balpha\u{1}Ea\u{1}Esection\u{1}Cbetait's\u{1}Esection\u{1}C\"&x < y\"\"\n"),
+        ("<!DOCTYPE html>&lt;&amp;<div title='&eacute;&amp;' class=\"alphax &lt; y&#x263A;\"><!-- a -- b --><li HREF='&lt;'><input><img /></li></div><Em class=plain title=42></Em>",
+        "Dhtml\u{1}C<&\u{1}Sdiv|title=\u{e9}&|class=alphax < y\u{263a}\u{1}M a -- b \u{1}Sli|href=<\u{1}Sinput\u{1}Simg\u{1}Eli\u{1}Ediv\u{1}Sem|class=plain|title=42\u{1}Eem"),
+        ("<!DOCTYPE html><script>if (a < b && c > d) { x = \"</p>\"; }</script>&amp;<HR />",
+        "Dhtml\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C&\u{1}Shr"),
+        ("<div></div><section id='&gt;' HREF=42><script>if (a < b && c > d) { x = \"</p>\"; }</script><section alt=plain alt='caf\u{e9}&amp;a &gt; b'><br HREF='&quot;  spaced  ' class='x &lt; yit&#39;s'/><Em id=x-1 HREF=plain></Em></section><input alt=a&amp;b /></section><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sdiv\u{1}Ediv\u{1}Ssection|id=>|href=42\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Ssection|alt=plain\u{1}Sbr|href=\"  spaced  |class=x < yit's\u{1}Sem|id=x-1|href=plain\u{1}Eem\u{1}Esection\u{1}Sinput|alt=a&b\u{1}Esection\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<!DOCTYPE html><div title='&lt;  spaced  '><b HREF='q\"uoteit&#39;s' disabled></b></div><li><div title=plain>alpha&quot;<HR title='it&#39;s' disabled /><P class='a &gt; b' class=\"&gt;\" disabled></P></div><span></span></li>",
+        "Dhtml\u{1}Sdiv|title=<  spaced  \u{1}Sb|href=q\"uoteit's|disabled=\u{1}Eb\u{1}Ediv\u{1}Sli\u{1}Sdiv|title=plain\u{1}Calpha\"\u{1}Shr|title=it's|disabled=\u{1}Sp|class=a > b|disabled=\u{1}Ep\u{1}Ediv\u{1}Sspan\u{1}Espan\u{1}Eli"),
+        ("<input data-x='&#65;it&#39;s'/><Em id='&lt;' class=\"beta\"></Em>",
+        "Sinput|data-x=Ait's\u{1}Sem|id=<|class=beta\u{1}Eem"),
+        ("<b><input/><input/>alphax &lt; y</b>",
+        "Sb\u{1}Sinput\u{1}Sinput\u{1}Calphax < y\u{1}Eb"),
+        ("<HR HREF=a&amp;b/>\n<li class=\"&hellip;q&quot;uote\" title=plain disabled>beta\n<!-- <p> --><div data-x=x-1 title=a&amp;b>it'sx &lt; yit's<img/><HR id='&hellip;x &lt; y'/></div></li><b>alpha</b>",
+        "Shr|href=a&b/\u{1}C\n\u{1}Sli|class=\u{2026}q\"uote|title=plain|disabled=\u{1}Cbeta\n\u{1}M <p> \u{1}Sdiv|data-x=x-1|title=a&b\u{1}Cit'sx < yit's\u{1}Simg\u{1}Shr|id=\u{2026}x < y\u{1}Ediv\u{1}Eli\u{1}Sb\u{1}Calpha\u{1}Eb"),
+        ("<br/><!-- a -- b -->",
+        "Sbr\u{1}M a -- b "),
+        ("<img><br title=42 /><span class='&hellip;it&#39;s' title='alphax &lt; ya &gt; b' disabled><b alt=\"x &lt; y&copy;\" HREF='alpha&hellip;'></b></span>&#x263A;",
+        "Simg\u{1}Sbr|title=42\u{1}Sspan|class=\u{2026}it's|title=alphax < ya > b|disabled=\u{1}Sb|alt=x < y\u{a9}|href=alpha\u{2026}\u{1}Eb\u{1}Espan\u{1}C\u{263a}"),
+        ("<P id=plain></P>",
+        "Sp|id=plain\u{1}Ep"),
+        ("<ul data-x=\"  spaced  \"></ul><!-- a -- b --><section><li id='&quot;' disabled>\n</li><br title=\"&lt;  spaced  \"/></section>",
+        "Sul|data-x=  spaced  \u{1}Eul\u{1}M a -- b \u{1}Ssection\u{1}Sli|id=\"|disabled=\u{1}C\n\u{1}Eli\u{1}Sbr|title=<  spaced  \u{1}Esection"),
+        ("<li class=\"alpha&gt; \"></li>",
+        "Sli|class=alpha> \u{1}Eli"),
+        ("<!-- note -->&quot;<style>p > a { color: red }</style><li><img id='a &gt; b&copy;q\"uote'/><input alt='beta'></li>",
+        "M note \u{1}C\"\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sli\u{1}Simg|id=a > b\u{a9}q\"uote\u{1}Sinput|alt=beta\u{1}Eli"),
+        ("<ul data-x=plain HREF='alpha&quot;'><script>if (a < b && c > d) { x = \"</p>\"; }</script><ul></ul><section HREF=\"  \" id=\"&copy;it's&quot;\">&copy;&copy;beta&amp;</section></ul><style>p > a { color: red }</style>",
+        "Sul|data-x=plain|href=alpha\"\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sul\u{1}Eul\u{1}Ssection|href=  |id=\u{a9}it's\"\u{1}C\u{a9}\u{a9}beta&\u{1}Esection\u{1}Eul\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<!DOCTYPE html><a HREF='&hellip;&copy;  spaced  ' disabled><br /></a><span><div></div></span>  spaced  &copy;beta",
+        "Dhtml\u{1}Sa|href=\u{2026}\u{a9}  spaced  |disabled=\u{1}Sbr\u{1}Ea\u{1}Sspan\u{1}Sdiv\u{1}Ediv\u{1}Espan\u{1}C  spaced  \u{a9}beta"),
+        ("<div alt=\"a &gt; b\"><P title=plain disabled><script>if (a < b && c > d) { x = \"</p>\"; }</script><section id=\"q&quot;uote&hellip;\"></section></P><!-- a -- b --><b>\nalpha\n  spaced  &#65;&copy;</b></div><input class=\"&gt;\"/><div><section data-x='alpha'></section><section title='&gt;' HREF=' &quot;&quot;'><br/></section>&eacute;</div><section alt=a&amp;b><div></div><a data-x=\"x &lt; y\" HREF=\"  spaced  \"><HR data-x='&gt;&eacute;&#65;'/>&lt;&hellip;<script>if (a < b && c > d) { x = \"</p>\"; }</script></a><b><b HREF=42 class=plain><br title=\"caf\u{e9}&#65;alpha\" title=\"  spaced  beta\" /><span alt='alpha&quot;a &gt; b' HREF=plain>&#65;a &gt; b</span></b>\nq\"uote<br title=\"beta&amp;&hellip;\" data-x=\"beta&eacute;\" /></b></section>",
+        "Sdiv|alt=a > b\u{1}Sp|title=plain|disabled=\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Ssection|id=q\"uote\u{2026}\u{1}Esection\u{1}Ep\u{1}M a -- b \u{1}Sb\u{1}C\nalpha\n  spaced  A\u{a9}\u{1}Eb\u{1}Ediv\u{1}Sinput|class=>\u{1}Sdiv\u{1}Ssection|data-x=alpha\u{1}Esection\u{1}Ssection|title=>|href= \"\"\u{1}Sbr\u{1}Esection\u{1}C\u{e9}\u{1}Ediv\u{1}Ssection|alt=a&b\u{1}Sdiv\u{1}Ediv\u{1}Sa|data-x=x < y|href=  spaced  \u{1}Shr|data-x=>\u{e9}A\u{1}C<\u{2026}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Ea\u{1}Sb\u{1}Sb|href=42|class=plain\u{1}Sbr|title=caf\u{e9}Aalpha\u{1}Sspan|alt=alpha\"a > b|href=plain\u{1}CAa > b\u{1}Espan\u{1}Eb\u{1}C\nq\"uote\u{1}Sbr|title=beta&\u{2026}|data-x=beta\u{e9}\u{1}Eb\u{1}Esection"),
+        ("<!DOCTYPE html><script>if (a < b && c > d) { x = \"</p>\"; }</script><b><!-- a -- b -->&#x263A;<HR disabled /></b>",
+        "Dhtml\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sb\u{1}M a -- b \u{1}C\u{263a}\u{1}Shr|disabled=\u{1}Eb"),
+        ("<!DOCTYPE html><style>p > a { color: red }</style>",
+        "Dhtml\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<!DOCTYPE html><input><P data-x=\"x &lt; y&eacute;\" alt='&lt;betabeta'>&eacute;&gt;caf\u{e9}&amp;alpha&hellip;<br/></P>",
+        "Dhtml\u{1}Sinput\u{1}Sp|data-x=x < y\u{e9}|alt=<betabeta\u{1}C\u{e9}>caf\u{e9}&alpha\u{2026}\u{1}Sbr\u{1}Ep"),
+        ("<style>p > a { color: red }</style><div alt=plain><script>if (a < b && c > d) { x = \"</p>\"; }</script></div><!-- <p> --><Em title=plain></Em>",
+        "Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sdiv|alt=plain\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Ediv\u{1}M <p> \u{1}Sem|title=plain\u{1}Eem"),
+        ("<P><a id=plain>caf\u{e9}x &lt; y&lt;</a><Em data-x='&#x263A;'><img class=' ' data-x=\"&quot;&eacute;\" disabled><!-- <p> --><section class=a&amp;b class=\"  spaced  \">q\"uote&gt;&#65;<style>p > a { color: red }</style>x &lt; y</section></Em>betaq\"uoteq\"uote</P><div class=\" &lt;x &lt; y\" HREF=' x &lt; y&copy;'><a title=\"  spaced  &amp;\"><span><!-- note --></span></a></div>",
+        "Sp\u{1}Sa|id=plain\u{1}Ccaf\u{e9}x < y<\u{1}Ea\u{1}Sem|data-x=\u{263a}\u{1}Simg|class= |data-x=\"\u{e9}|disabled=\u{1}M <p> \u{1}Ssection|class=a&b\u{1}Cq\"uote>A\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Cx < y\u{1}Esection\u{1}Eem\u{1}Cbetaq\"uoteq\"uote\u{1}Ep\u{1}Sdiv|class= <x < y|href= x < y\u{a9}\u{1}Sa|title=  spaced  &\u{1}Sspan\u{1}M note \u{1}Espan\u{1}Ea\u{1}Ediv"),
+        ("<!DOCTYPE html><Em></Em><script>if (a < b && c > d) { x = \"</p>\"; }</script><li data-x=\"  spaced  caf\u{e9}\" title=\"it's&copy;\"><li data-x='betacaf\u{e9}'>alphaq\"uote<br/><li></li></li></li>",
+        "Dhtml\u{1}Sem\u{1}Eem\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sli|data-x=  spaced  caf\u{e9}|title=it's\u{a9}\u{1}Sli|data-x=betacaf\u{e9}\u{1}Calphaq\"uote\u{1}Sbr\u{1}Sli\u{1}Eli\u{1}Eli\u{1}Eli"),
+        ("<span class='q\"uoteq\"uote' HREF='&lt;'>&#x263A;it's<img alt=plain/></span><Em class=\"&amp;&lt;&amp;\" class='&#65;caf\u{e9}&hellip;' disabled>it's&quot;<section data-x=x-1><Em data-x='&#x263A;'><b HREF='beta&copy;' alt=\"&gt;\"></b><ul class=x-1 class=\"&gt;it's\"></ul></Em><style>p > a { color: red }</style></section><section HREF=x-1>a &gt; b<style>p > a { color: red }</style></section></Em>",
+        "Sspan|class=q\"uoteq\"uote|href=<\u{1}C\u{263a}it's\u{1}Simg|alt=plain/\u{1}Espan\u{1}Sem|class=&<&|disabled=\u{1}Cit's\"\u{1}Ssection|data-x=x-1\u{1}Sem|data-x=\u{263a}\u{1}Sb|href=beta\u{a9}|alt=>\u{1}Eb\u{1}Sul|class=x-1\u{1}Eul\u{1}Eem\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Esection\u{1}Ssection|href=x-1\u{1}Ca > b\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Esection\u{1}Eem"),
+        ("<a title=42 id=\"caf\u{e9}\"><!-- note --><ul>x &lt; ybeta<br alt=\"&#x263A;\"/>q\"uotea &gt; b&amp;</ul><div HREF=x-1 id=x-1>&eacute;&gt;<P alt=42><ul>&copy;x &lt; y</ul></P><section title='&#65; '><!-- <p> --><P HREF=\"&copy;a &gt; b\"><script>if (a < b && c > d) { x = \"</p>\"; }</script><style>p > a { color: red }</style></P></section></div></a><input /><a id=\"&amp;&copy;&quot;\" disabled><a alt=\"alpha&#65;\"></a></a><Em HREF=\"  spaced  caf\u{e9}it's\"><li alt='alpha  spaced  ' data-x='it&#39;s'><section HREF='&gt; '><b><input class=' &eacute;' data-x=plain disabled/></b><P class='q\"uotebeta' id=\"&#x263A;&lt;\"><style>p > a { color: red }</style></P></section><Em><span>  spaced    spaced  &amp;</span></Em></li></Em>",
+        "Sa|title=42|id=caf\u{e9}\u{1}M note \u{1}Sul\u{1}Cx < ybeta\u{1}Sbr|alt=\u{263a}\u{1}Cq\"uotea > b&\u{1}Eul\u{1}Sdiv|href=x-1|id=x-1\u{1}C\u{e9}>\u{1}Sp|alt=42\u{1}Sul\u{1}C\u{a9}x < y\u{1}Eul\u{1}Ep\u{1}Ssection|title=A \u{1}M <p> \u{1}Sp|href=\u{a9}a > b\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Ep\u{1}Esection\u{1}Ediv\u{1}Ea\u{1}Sinput\u{1}Sa|id=&\u{a9}\"|disabled=\u{1}Sa|alt=alphaA\u{1}Ea\u{1}Ea\u{1}Sem|href=  spaced  caf\u{e9}it's\u{1}Sli|alt=alpha  spaced  |data-x=it's\u{1}Ssection|href=> \u{1}Sb\u{1}Sinput|class= \u{e9}|data-x=plain|disabled=\u{1}Eb\u{1}Sp|class=q\"uotebeta|id=\u{263a}<\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Ep\u{1}Esection\u{1}Sem\u{1}Sspan\u{1}C  spaced    spaced  &\u{1}Espan\u{1}Eem\u{1}Eli\u{1}Eem"),
+        ("<li alt=a&amp;b class='x &lt; y caf\u{e9}'><P data-x=plain alt=\"caf\u{e9}&eacute;&amp;\"><span data-x=42><span class='&copy;&lt;' alt=\"&#x263A;\">&gt;\n&#65;</span><b>&lt;caf\u{e9}</b></span><span id=\"it's\"><Em title=a&amp;b alt='it&#39;s q\"uote'><br/></Em><b disabled>alpha&hellip;q\"uoteq\"uote&#65;</b><br/></span></P></li><!-- <p> -->",
+        "Sli|alt=a&b|class=x < y caf\u{e9}\u{1}Sp|data-x=plain|alt=caf\u{e9}\u{e9}&\u{1}Sspan|data-x=42\u{1}Sspan|class=\u{a9}<|alt=\u{263a}\u{1}C>\nA\u{1}Espan\u{1}Sb\u{1}C<caf\u{e9}\u{1}Eb\u{1}Espan\u{1}Sspan|id=it's\u{1}Sem|title=a&b|alt=it's q\"uote\u{1}Sbr\u{1}Eem\u{1}Sb|disabled=\u{1}Calpha\u{2026}q\"uoteq\"uoteA\u{1}Eb\u{1}Sbr\u{1}Espan\u{1}Ep\u{1}Eli\u{1}M <p> "),
+        ("<!DOCTYPE html><section><a alt='&#x263A;' class='alpha'><!-- note --><!-- a -- b --></a></section><b alt='alpha&quot;caf\u{e9}' id=\"&eacute;&hellip;\"><b HREF=\"a &gt; b\"><div data-x='it&#39;s&amp;q\"uote'><P id=a&amp;b title='&eacute;&lt;'></P><Em class=42 HREF='it&#39;s&quot;'></Em>a &gt; b&amp;&#x263A;</div><script>if (a < b && c > d) { x = \"</p>\"; }</script><div id='q\"uoteq\"uote&lt;' HREF='&#x263A;it&#39;sa &gt; b'></div></b><li alt='&#x263A; x &lt; y' HREF=\"&eacute;  spaced  \">&copy;alphacaf\u{e9}<P data-x=\"&eacute;\"><div HREF=x-1></div><section>a &gt; bbeta</section>&gt;beta</P>alpha</li><div data-x=42>betacaf\u{e9}</div></b><b title=x-1>&#65;  spaced  alphaalpha<br></b>",
+        "Dhtml\u{1}Ssection\u{1}Sa|alt=\u{263a}|class=alpha\u{1}M note \u{1}M a -- b \u{1}Ea\u{1}Esection\u{1}Sb|alt=alpha\"caf\u{e9}|id=\u{e9}\u{2026}\u{1}Sb|href=a > b\u{1}Sdiv|data-x=it's&q\"uote\u{1}Sp|id=a&b|title=\u{e9}<\u{1}Ep\u{1}Sem|class=42|href=it's\"\u{1}Eem\u{1}Ca > b&\u{263a}\u{1}Ediv\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sdiv|id=q\"uoteq\"uote<|href=\u{263a}it'sa > b\u{1}Ediv\u{1}Eb\u{1}Sli|alt=\u{263a} x < y|href=\u{e9}  spaced  \u{1}C\u{a9}alphacaf\u{e9}\u{1}Sp|data-x=\u{e9}\u{1}Sdiv|href=x-1\u{1}Ediv\u{1}Ssection\u{1}Ca > bbeta\u{1}Esection\u{1}C>beta\u{1}Ep\u{1}Calpha\u{1}Eli\u{1}Sdiv|data-x=42\u{1}Cbetacaf\u{e9}\u{1}Ediv\u{1}Eb\u{1}Sb|title=x-1\u{1}CA  spaced  alphaalpha\u{1}Sbr\u{1}Eb"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script>&lt;&eacute;<Em HREF=42 HREF=x-1 disabled><span><script>if (a < b && c > d) { x = \"</p>\"; }</script><b disabled></b><img class=\"&eacute;&#65;&quot;\" title=\"&amp;&hellip;\"></span></Em>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C<\u{e9}\u{1}Sem|href=42|disabled=\u{1}Sspan\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sb|disabled=\u{1}Eb\u{1}Simg|class=\u{e9}A\"|title=&\u{2026}\u{1}Espan\u{1}Eem"),
+        ("x &lt; ybeta<Em><br /></Em>",
+        "Cx < ybeta\u{1}Sem\u{1}Sbr\u{1}Eem"),
+        ("&gt;&#65;",
+        "C>A"),
+        ("<!DOCTYPE html>&lt;a &gt; b<HR alt='betabeta' disabled /><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Dhtml\u{1}C<a > b\u{1}Shr|alt=betabeta|disabled=\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<P id=\"&gt;\" alt=\"&hellip;\"><HR title=\"a &gt; b&amp;&eacute;\" data-x='it&#39;sbeta' disabled></P><div><li data-x=\"&gt;\" disabled>caf\u{e9}alpha&hellip;<Em><section HREF=42 title='x &lt; y'>&quot;q\"uote&#65;&#65;</section><span>a &gt; bbeta  spaced  </span></Em>&eacute;</li><span class=\"&#65;\">a &gt; bx &lt; y<a HREF=x-1 class='&quot;'></a></span></div>",
+        "Sp|id=>|alt=\u{2026}\u{1}Shr|title=a > b&\u{e9}|data-x=it'sbeta|disabled=\u{1}Ep\u{1}Sdiv\u{1}Sli|data-x=>|disabled=\u{1}Ccaf\u{e9}alpha\u{2026}\u{1}Sem\u{1}Ssection|href=42|title=x < y\u{1}C\"q\"uoteAA\u{1}Esection\u{1}Sspan\u{1}Ca > bbeta  spaced  \u{1}Espan\u{1}Eem\u{1}C\u{e9}\u{1}Eli\u{1}Sspan|class=A\u{1}Ca > bx < y\u{1}Sa|href=x-1|class=\"\u{1}Ea\u{1}Espan\u{1}Ediv"),
+        ("<Em alt=plain title='  spaced  ' disabled><div title='&lt;beta' id=\"  spaced  \"><section alt=\"alpha\"></section><!-- <p> --></div><b><section HREF=x-1></section><br title=a&amp;b />x &lt; y</b></Em><li HREF='  spaced  '></li><ul class=\"&hellip;&copy;\" data-x='&#x263A;'><li><input alt='&copy;' id=' &hellip;' /></li></ul><img data-x='x &lt; ybeta&eacute;' />",
+        "Sem|alt=plain|title=  spaced  |disabled=\u{1}Sdiv|title=<beta|id=  spaced  \u{1}Ssection|alt=alpha\u{1}Esection\u{1}M <p> \u{1}Ediv\u{1}Sb\u{1}Ssection|href=x-1\u{1}Esection\u{1}Sbr|title=a&b\u{1}Cx < y\u{1}Eb\u{1}Eem\u{1}Sli|href=  spaced  \u{1}Eli\u{1}Sul|class=\u{2026}\u{a9}|data-x=\u{263a}\u{1}Sli\u{1}Sinput|alt=\u{a9}|id= \u{2026}\u{1}Eli\u{1}Eul\u{1}Simg|data-x=x < ybeta\u{e9}"),
+        ("<ul class=\"x &lt; yit's\" class=\"&hellip;\"><script>if (a < b && c > d) { x = \"</p>\"; }</script><div data-x=plain HREF='x &lt; ya &gt; b&copy;'><li data-x=x-1 id='caf\u{e9}&#65;'><input class=x-1></li><input data-x=\"caf\u{e9}\" alt='alphait&#39;s'/></div><div id=\"&amp;\" id=\"it'salpha\">\n<!-- <p> --></div></ul>&lt;q\"uotealpha<!-- a -- b --><style>p > a { color: red }</style>",
+        "Sul|class=x < yit's\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sdiv|data-x=plain|href=x < ya > b\u{a9}\u{1}Sli|data-x=x-1|id=caf\u{e9}A\u{1}Sinput|class=x-1\u{1}Eli\u{1}Sinput|data-x=caf\u{e9}|alt=alphait's\u{1}Ediv\u{1}Sdiv|id=&\u{1}C\n\u{1}M <p> \u{1}Ediv\u{1}Eul\u{1}C<q\"uotealpha\u{1}M a -- b \u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<li title='&gt;&quot;'>betabetax &lt; yq\"uote&copy;</li><style>p > a { color: red }</style><li><li class=\"&#65;it'salpha\"><HR>alpha  spaced  </li>q\"uote<HR></li><span alt='&quot;' disabled></span>",
+        "Sli|title=>\"\u{1}Cbetabetax < yq\"uote\u{a9}\u{1}Eli\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sli\u{1}Sli|class=Ait'salpha\u{1}Shr\u{1}Calpha  spaced  \u{1}Eli\u{1}Cq\"uote\u{1}Shr\u{1}Eli\u{1}Sspan|alt=\"|disabled=\u{1}Espan"),
+        ("<span id=\"&lt;it'salpha\" alt=\"beta&#65;\"><span data-x='&gt;&eacute;&gt;'>&eacute;alpha&#x263A;<Em class='x &lt; y'><div HREF='&hellip;a &gt; b' HREF=plain><!-- <p> --></div>&amp;  spaced  </Em></span>&hellip;q\"uote&gt;x &lt; y  spaced  </span><!-- <p> --><!-- note --><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sspan|id=<it'salpha|alt=betaA\u{1}Sspan|data-x=>\u{e9}>\u{1}C\u{e9}alpha\u{263a}\u{1}Sem|class=x < y\u{1}Sdiv|href=\u{2026}a > b\u{1}M <p> \u{1}Ediv\u{1}C&  spaced  \u{1}Eem\u{1}Espan\u{1}C\u{2026}q\"uote>x < y  spaced  \u{1}Espan\u{1}M <p> \u{1}M note \u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script><br disabled/>alpha",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sbr|disabled=\u{1}Calpha"),
+        ("&#x263A;it'scaf\u{e9}caf\u{e9}<ul HREF=a&amp;b alt=\"x &lt; y&lt;alpha\"><a id='&#x263A;&#x263A;alpha'><input/></a><ul alt=\"q&quot;uote&lt;\"></ul></ul>",
+        "C\u{263a}it'scaf\u{e9}caf\u{e9}\u{1}Sul|href=a&b|alt=x < y<alpha\u{1}Sa|id=\u{263a}\u{263a}alpha\u{1}Sinput\u{1}Ea\u{1}Sul|alt=q\"uote<\u{1}Eul\u{1}Eul"),
+        ("<HR>&copy;<script>if (a < b && c > d) { x = \"</p>\"; }</script>&amp;&gt;beta",
+        "Shr\u{1}C\u{a9}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C&>beta"),
+        ("<!DOCTYPE html>caf\u{e9}",
+        "Dhtml\u{1}Ccaf\u{e9}"),
+        ("<b><!-- note --></b><input id='&gt;' HREF=\"   spaced  \" /><Em class=x-1 alt=\"&#65; \"><a><span alt=x-1 alt=x-1><div></div>it's\nalpha</span></a></Em><Em><b disabled><ul class='&amp;'><li title='it&#39;s  spaced  '></li><input title=x-1 disabled /></ul><section><script>if (a < b && c > d) { x = \"</p>\"; }</script></section><HR title='&copy;&copy;'/></b>x &lt; y\n</Em>",
+        "Sb\u{1}M note \u{1}Eb\u{1}Sinput|id=>|href=   spaced  \u{1}Sem|class=x-1|alt=A \u{1}Sa\u{1}Sspan|alt=x-1\u{1}Sdiv\u{1}Ediv\u{1}Cit's\nalpha\u{1}Espan\u{1}Ea\u{1}Eem\u{1}Sem\u{1}Sb|disabled=\u{1}Sul|class=&\u{1}Sli|title=it's  spaced  \u{1}Eli\u{1}Sinput|title=x-1|disabled=\u{1}Eul\u{1}Ssection\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Esection\u{1}Shr|title=\u{a9}\u{a9}\u{1}Eb\u{1}Cx < y\n\u{1}Eem"),
+        ("<b HREF=\"&amp;\" title='alphabetabeta' disabled></b><!-- note -->",
+        "Sb|href=&|title=alphabetabeta|disabled=\u{1}Eb\u{1}M note "),
+        ("<!-- note -->",
+        "M note "),
+        ("<!DOCTYPE html><ul><ul><div class=\"it's\" id='a &gt; b&#65;'>&gt;</div>  spaced  <Em id=plain>  spaced    spaced  </Em></ul></ul>",
+        "Dhtml\u{1}Sul\u{1}Sul\u{1}Sdiv|class=it's|id=a > bA\u{1}C>\u{1}Ediv\u{1}C  spaced  \u{1}Sem|id=plain\u{1}C  spaced    spaced  \u{1}Eem\u{1}Eul\u{1}Eul"),
+        ("<!DOCTYPE html><section alt=\"&#65;&copy;x &lt; y\" title=\" x &lt; y\"><br><a></a></section><br id=42>a &gt; b  spaced  a &gt; b<!-- note -->",
+        "Dhtml\u{1}Ssection|alt=A\u{a9}x < y|title= x < y\u{1}Sbr\u{1}Sa\u{1}Ea\u{1}Esection\u{1}Sbr|id=42\u{1}Ca > b  spaced  a > b\u{1}M note "),
+        ("<span class=x-1>&gt;alphax &lt; y&#x263A;it's&hellip;</span><P alt=\"caf\u{e9}\" alt=a&amp;b></P><HR data-x='q\"uote'><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sspan|class=x-1\u{1}C>alphax < y\u{263a}it's\u{2026}\u{1}Espan\u{1}Sp|alt=caf\u{e9}\u{1}Ep\u{1}Shr|data-x=q\"uote\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<!DOCTYPE html><Em class=\"&#65;&eacute;a &gt; b\"></Em><P><!-- a -- b --></P>",
+        "Dhtml\u{1}Sem|class=A\u{e9}a > b\u{1}Eem\u{1}Sp\u{1}M a -- b \u{1}Ep"),
+        ("&#65;<style>p > a { color: red }</style>",
+        "CA\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("x &lt; y&copy;  spaced  <span alt=x-1 alt=\"&#x263A;q&quot;uotex &lt; y\"><P><P><span alt='caf\u{e9}  spaced  alpha' disabled></span></P><Em class=\"it's&#65;alpha\"><ul disabled>beta&eacute;</ul><Em>beta  spaced  q\"uotea &gt; bbetaalpha</Em><br id=\"  spaced  &eacute;a &gt; b\" HREF=x-1></Em><a id=\"beta \"><li></li><input title=a&amp;b></a></P><br title=\"&lt;&amp;\" HREF=42></span><section id=\"&copy;\"><!-- <p> --><HR alt='it&#39;s&lt;&lt;'></section><div><ul>it's&lt;alpha</ul></div>",
+        "Cx < y\u{a9}  spaced  \u{1}Sspan|alt=x-1\u{1}Sp\u{1}Sp\u{1}Sspan|alt=caf\u{e9}  spaced  alpha|disabled=\u{1}Espan\u{1}Ep\u{1}Sem|class=it'sAalpha\u{1}Sul|disabled=\u{1}Cbeta\u{e9}\u{1}Eul\u{1}Sem\u{1}Cbeta  spaced  q\"uotea > bbetaalpha\u{1}Eem\u{1}Sbr|id=  spaced  \u{e9}a > b|href=x-1\u{1}Eem\u{1}Sa|id=beta \u{1}Sli\u{1}Eli\u{1}Sinput|title=a&b\u{1}Ea\u{1}Ep\u{1}Sbr|title=<&|href=42\u{1}Espan\u{1}Ssection|id=\u{a9}\u{1}M <p> \u{1}Shr|alt=it's<<\u{1}Esection\u{1}Sdiv\u{1}Sul\u{1}Cit's<alpha\u{1}Eul\u{1}Ediv"),
+        ("<ul>it's<!-- a -- b --></ul>",
+        "Sul\u{1}Cit's\u{1}M a -- b \u{1}Eul"),
+        ("<b class=\"x &lt; yx &lt; y\" id=\"&copy;\"><br alt=\"it's \"></b><HR data-x=\"beta\" class=\"beta\"><P class=\"&lt;  spaced  \"><br class=\"a &gt; bcaf\u{e9}\"/>  spaced  &gt;q\"uote</P>",
+        "Sb|class=x < yx < y|id=\u{a9}\u{1}Sbr|alt=it's \u{1}Eb\u{1}Shr|data-x=beta|class=beta\u{1}Sp|class=<  spaced  \u{1}Sbr|class=a > bcaf\u{e9}\u{1}C  spaced  >q\"uote\u{1}Ep"),
+        ("<!DOCTYPE html><P></P>",
+        "Dhtml\u{1}Sp\u{1}Ep"),
+        ("<!DOCTYPE html><input class='beta' id='&quot;q\"uote'/><HR/><br title='a &gt; bit&#39;salpha'/>",
+        "Dhtml\u{1}Sinput|class=beta|id=\"q\"uote\u{1}Shr\u{1}Sbr|title=a > bit'salpha"),
+        ("it's&quot;&eacute;<a disabled>&hellip;q\"uote&#65;</a><HR data-x=42/>",
+        "Cit's\"\u{e9}\u{1}Sa|disabled=\u{1}C\u{2026}q\"uoteA\u{1}Ea\u{1}Shr|data-x=42/"),
+        ("<!DOCTYPE html><ul title=x-1></ul>",
+        "Dhtml\u{1}Sul|title=x-1\u{1}Eul"),
+        ("&lt;caf\u{e9}&quot;<span></span>",
+        "C<caf\u{e9}\"\u{1}Sspan\u{1}Espan"),
+        ("<!DOCTYPE html>\n<span title='&copy;' title='caf\u{e9} '><ul disabled><Em><ul>alpha\n\n</ul><span title=plain id='it&#39;sbeta&lt;'>beta\n<!-- <p> --></span><input data-x=x-1 disabled></Em><br/></ul>  spaced  caf\u{e9}&amp;&#65;it's</span><div HREF='&lt;' disabled></div>",
+        "Dhtml\u{1}C\n\u{1}Sspan|title=\u{a9}\u{1}Sul|disabled=\u{1}Sem\u{1}Sul\u{1}Calpha\n\n\u{1}Eul\u{1}Sspan|title=plain|id=it'sbeta<\u{1}Cbeta\n\u{1}M <p> \u{1}Espan\u{1}Sinput|data-x=x-1|disabled=\u{1}Eem\u{1}Sbr\u{1}Eul\u{1}C  spaced  caf\u{e9}&Ait's\u{1}Espan\u{1}Sdiv|href=<|disabled=\u{1}Ediv"),
+        ("<P alt=\"alpha&#x263A;\" disabled><img/>&copy;beta  spaced  </P>",
+        "Sp|alt=alpha\u{263a}|disabled=\u{1}Simg\u{1}C\u{a9}beta  spaced  \u{1}Ep"),
+        ("<!DOCTYPE html><div disabled><!-- note -->&#x263A;q\"uote</div><HR/>",
+        "Dhtml\u{1}Sdiv|disabled=\u{1}M note \u{1}C\u{263a}q\"uote\u{1}Ediv\u{1}Shr"),
+        ("<!DOCTYPE html><img title=plain title=\"&copy;&hellip;\"><HR /><HR data-x=plain/>",
+        "Dhtml\u{1}Simg|title=plain\u{1}Shr\u{1}Shr|data-x=plain/"),
+        ("<!DOCTYPE html><br title='&lt;  spaced    spaced  ' disabled>",
+        "Dhtml\u{1}Sbr|title=<  spaced    spaced  |disabled="),
+        ("<!DOCTYPE html>\nx &lt; ya &gt; balpha\n",
+        "Dhtml\u{1}C\nx < ya > balpha\n"),
+        ("<!-- <p> -->alpha",
+        "M <p> \u{1}Calpha"),
+        ("<li HREF=x-1 alt=\"&#x263A;&gt;it's\" disabled>betaa &gt; b<br /><img HREF='x &lt; y' /></li><br title=\"caf\u{e9}&eacute;\" disabled><P></P><style>p > a { color: red }</style>",
+        "Sli|href=x-1|alt=\u{263a}>it's|disabled=\u{1}Cbetaa > b\u{1}Sbr\u{1}Simg|href=x < y\u{1}Eli\u{1}Sbr|title=caf\u{e9}\u{e9}|disabled=\u{1}Sp\u{1}Ep\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<!DOCTYPE html>\n<HR><li data-x='it&#39;s' title=' alpha'>a &gt; b&eacute;  spaced  <HR data-x=42/></li>alpha",
+        "Dhtml\u{1}C\n\u{1}Shr\u{1}Sli|data-x=it's|title= alpha\u{1}Ca > b\u{e9}  spaced  \u{1}Shr|data-x=42/\u{1}Eli\u{1}Calpha"),
+        ("<P class=\"  spaced  &#65;&#65;\" HREF=\"q&quot;uotealpha&amp;\">&amp;<img><input /></P>&eacute;",
+        "Sp|class=  spaced  AA|href=q\"uotealpha&\u{1}C&\u{1}Simg\u{1}Sinput\u{1}Ep\u{1}C\u{e9}"),
+        ("<!-- <p> --><b title='&lt;' HREF=42>caf\u{e9}x &lt; ycaf\u{e9}</b>",
+        "M <p> \u{1}Sb|title=<|href=42\u{1}Ccaf\u{e9}x < ycaf\u{e9}\u{1}Eb"),
+        ("<P data-x=plain id='it&#39;s&amp;' disabled><Em><style>p > a { color: red }</style>&gt;&#65;q\"uote</Em></P>",
+        "Sp|data-x=plain|id=it's&|disabled=\u{1}Sem\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}C>Aq\"uote\u{1}Eem\u{1}Ep"),
+        ("<Em data-x=plain><br class=\"&copy;&quot; \"><Em disabled>&gt;&amp;it's<style>p > a { color: red }</style></Em><P HREF=plain><ul><P><!-- <p> --><style>p > a { color: red }</style>betax &lt; y</P><Em>\nx &lt; yit's  spaced  &quot;</Em></ul></P></Em><!-- <p> -->caf\u{e9}  spaced  &lt;",
+        "Sem|data-x=plain\u{1}Sbr|class=\u{a9}\" \u{1}Sem|disabled=\u{1}C>&it's\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Eem\u{1}Sp|href=plain\u{1}Sul\u{1}Sp\u{1}M <p> \u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Cbetax < y\u{1}Ep\u{1}Sem\u{1}C\nx < yit's  spaced  \"\u{1}Eem\u{1}Eul\u{1}Ep\u{1}Eem\u{1}M <p> \u{1}Ccaf\u{e9}  spaced  <"),
+        ("<!DOCTYPE html><img /><li title=\"caf\u{e9}\" class=\"&#x263A;betait's\">&gt;&quot;</li><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Dhtml\u{1}Simg\u{1}Sli|title=caf\u{e9}|class=\u{263a}betait's\u{1}C>\"\u{1}Eli\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<style>p > a { color: red }</style><li><style>p > a { color: red }</style><style>p > a { color: red }</style></li><a></a>&hellip;a &gt; bq\"uote",
+        "Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sli\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Eli\u{1}Sa\u{1}Ea\u{1}C\u{2026}a > bq\"uote"),
+        ("<a><style>p > a { color: red }</style><span id=a&amp;b><!-- note --><!-- <p> --><div disabled></div></span></a><style>p > a { color: red }</style>",
+        "Sa\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sspan|id=a&b\u{1}M note \u{1}M <p> \u{1}Sdiv|disabled=\u{1}Ediv\u{1}Espan\u{1}Ea\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<span class=42 id=\"&#65;  spaced  \" disabled></span>betaa &gt; b<Em><input HREF=plain disabled/><section class=\"caf\u{e9}\" alt=42><section HREF=\"&#65;\"><P id=plain title=plain>x &lt; y&eacute;q\"uote&lt;</P><!-- a -- b --><span alt=42>&amp;caf\u{e9}<script>if (a < b && c > d) { x = \"</p>\"; }</script></span></section><section alt=\"&hellip;\"></section><script>if (a < b && c > d) { x = \"</p>\"; }</script></section><li data-x=\"alphaq&quot;uotea &gt; b\"></li></Em>",
+        "Sspan|class=42|id=A  spaced  |disabled=\u{1}Espan\u{1}Cbetaa > b\u{1}Sem\u{1}Sinput|href=plain|disabled=\u{1}Ssection|class=caf\u{e9}|alt=42\u{1}Ssection|href=A\u{1}Sp|id=plain|title=plain\u{1}Cx < y\u{e9}q\"uote<\u{1}Ep\u{1}M a -- b \u{1}Sspan|alt=42\u{1}C&caf\u{e9}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Espan\u{1}Esection\u{1}Ssection|alt=\u{2026}\u{1}Esection\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Esection\u{1}Sli|data-x=alphaq\"uotea > b\u{1}Eli\u{1}Eem"),
+        ("<ul><!-- a -- b --></ul><HR data-x=\"&#65;&#65;&gt;\"/>&#65;a &gt; b  spaced  \n",
+        "Sul\u{1}M a -- b \u{1}Eul\u{1}Shr|data-x=AA>\u{1}CAa > b  spaced  \n"),
+        ("<!DOCTYPE html><li id=plain title=\"q&quot;uote\"><ul id='&quot;' title=\"&lt;&hellip;\"><!-- note -->  spaced  &quot;&eacute;<script>if (a < b && c > d) { x = \"</p>\"; }</script></ul></li><section id='beta&#x263A;  spaced  '></section>alpha\n&hellip;&gt;&lt;\n",
+        "Dhtml\u{1}Sli|id=plain|title=q\"uote\u{1}Sul|id=\"|title=<\u{2026}\u{1}M note \u{1}C  spaced  \"\u{e9}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eul\u{1}Eli\u{1}Ssection|id=beta\u{263a}  spaced  \u{1}Esection\u{1}Calpha\n\u{2026}><\n"),
+        ("<!DOCTYPE html><a><section><div class='&amp;' data-x=\"&quot;&quot;\"><Em><img id=\"caf\u{e9}it's&amp;\"/>it'scaf\u{e9}&lt;alpha&eacute;</Em><Em disabled></Em><section id=x-1 disabled>&copy;&amp;<!-- <p> --></section></div><input/></section><b><script>if (a < b && c > d) { x = \"</p>\"; }</script>a &gt; b&gt;<div></div></b><img/></a><section title=42 data-x=\"alpha&eacute;alpha\">x &lt; y&#x263A;</section>",
+        "Dhtml\u{1}Sa\u{1}Ssection\u{1}Sdiv|class=&|data-x=\"\"\u{1}Sem\u{1}Simg|id=caf\u{e9}it's&\u{1}Cit'scaf\u{e9}<alpha\u{e9}\u{1}Eem\u{1}Sem|disabled=\u{1}Eem\u{1}Ssection|id=x-1|disabled=\u{1}C\u{a9}&\u{1}M <p> \u{1}Esection\u{1}Ediv\u{1}Sinput\u{1}Esection\u{1}Sb\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Ca > b>\u{1}Sdiv\u{1}Ediv\u{1}Eb\u{1}Simg\u{1}Ea\u{1}Ssection|title=42|data-x=alpha\u{e9}alpha\u{1}Cx < y\u{263a}\u{1}Esection"),
+        ("<!DOCTYPE html><P><P alt=\"&gt;\" HREF='&lt;'></P><HR HREF='&#65;'><li HREF=a&amp;b><P><Em><img>caf\u{e9}</Em><li id=\"&quot;\" disabled>\ncaf\u{e9}</li>&lt;alpha</P>\n</li></P><style>p > a { color: red }</style>it'salpha",
+        "Dhtml\u{1}Sp\u{1}Sp|alt=>|href=<\u{1}Ep\u{1}Shr|href=A\u{1}Sli|href=a&b\u{1}Sp\u{1}Sem\u{1}Simg\u{1}Ccaf\u{e9}\u{1}Eem\u{1}Sli|id=\"|disabled=\u{1}C\ncaf\u{e9}\u{1}Eli\u{1}C<alpha\u{1}Ep\u{1}C\n\u{1}Eli\u{1}Ep\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Cit'salpha"),
+        ("<!DOCTYPE html><HR HREF=\"&gt;&eacute;\"/>\n&quot;x &lt; y<div><section HREF=\"&copy;\"></section><br/><span HREF=42 disabled><section data-x=\"&hellip;&#x263A;\"><div id=\" x &lt; y&copy;\"></div></section><Em data-x=\"&amp;it's \"></Em><input class=\"x &lt; y&lt;\"></span></div><HR data-x=plain/>",
+        "Dhtml\u{1}Shr|href=>\u{e9}\u{1}C\n\"x < y\u{1}Sdiv\u{1}Ssection|href=\u{a9}\u{1}Esection\u{1}Sbr\u{1}Sspan|href=42|disabled=\u{1}Ssection|data-x=\u{2026}\u{263a}\u{1}Sdiv|id= x < y\u{a9}\u{1}Ediv\u{1}Esection\u{1}Sem|data-x=&it's \u{1}Eem\u{1}Sinput|class=x < y<\u{1}Espan\u{1}Ediv\u{1}Shr|data-x=plain/"),
+        ("<!DOCTYPE html><ul><script>if (a < b && c > d) { x = \"</p>\"; }</script></ul><li><HR alt=\"&eacute;\" class=plain />\n&copy;</li><HR alt=a&amp;b /><div HREF=plain></div>",
+        "Dhtml\u{1}Sul\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eul\u{1}Sli\u{1}Shr|alt=\u{e9}|class=plain\u{1}C\n\u{a9}\u{1}Eli\u{1}Shr|alt=a&b\u{1}Sdiv|href=plain\u{1}Ediv"),
+        ("<HR alt=x-1 class=\"betabeta&gt;\"/><li id=plain title=\"alphax &lt; y  spaced  \"><!-- <p> -->&copy;<script>if (a < b && c > d) { x = \"</p>\"; }</script></li>",
+        "Shr|alt=x-1|class=betabeta>\u{1}Sli|id=plain|title=alphax < y  spaced  \u{1}M <p> \u{1}C\u{a9}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eli"),
+        ("<!DOCTYPE html><b><span HREF=\"q&quot;uote\">&hellip;<div>caf\u{e9}&copy;&gt;</div></span></b><HR id=a&amp;b/><Em>betax &lt; yalpha<div disabled><span data-x=\"alpha\"><li>&lt;</li><script>if (a < b && c > d) { x = \"</p>\"; }</script>\n</span><script>if (a < b && c > d) { x = \"</p>\"; }</script><b data-x=\"q&quot;uote&hellip;\"></b></div></Em>",
+        "Dhtml\u{1}Sb\u{1}Sspan|href=q\"uote\u{1}C\u{2026}\u{1}Sdiv\u{1}Ccaf\u{e9}\u{a9}>\u{1}Ediv\u{1}Espan\u{1}Eb\u{1}Shr|id=a&b/\u{1}Sem\u{1}Cbetax < yalpha\u{1}Sdiv|disabled=\u{1}Sspan|data-x=alpha\u{1}Sli\u{1}C<\u{1}Eli\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C\n\u{1}Espan\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sb|data-x=q\"uote\u{2026}\u{1}Eb\u{1}Ediv\u{1}Eem"),
+        ("beta",
+        "Cbeta"),
+        ("<!DOCTYPE html>a &gt; b",
+        "Dhtml\u{1}Ca > b"),
+        ("caf\u{e9}<Em title='&eacute;'><HR id='&copy;&gt;'/><style>p > a { color: red }</style><input alt=plain/></Em><!-- note -->",
+        "Ccaf\u{e9}\u{1}Sem|title=\u{e9}\u{1}Shr|id=\u{a9}>\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sinput|alt=plain/\u{1}Eem\u{1}M note "),
+        ("<span><input data-x=\"  spaced  caf\u{e9}q&quot;uote\"></span>",
+        "Sspan\u{1}Sinput|data-x=  spaced  caf\u{e9}q\"uote\u{1}Espan"),
+        ("<b class='&#x263A;&hellip;'><a HREF=42><b></b><style>p > a { color: red }</style><span><HR alt=plain alt=plain/>&#65;<img></span></a><br/></b>&#65;&copy;  spaced  &quot;",
+        "Sb|class=\u{263a}\u{2026}\u{1}Sa|href=42\u{1}Sb\u{1}Eb\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sspan\u{1}Shr|alt=plain\u{1}CA\u{1}Simg\u{1}Espan\u{1}Ea\u{1}Sbr\u{1}Eb\u{1}CA\u{a9}  spaced  \""),
+        ("<Em alt=\"&#65;\" data-x='&gt;x &lt; yit&#39;s'></Em>",
+        "Sem|alt=A|data-x=>x < yit's\u{1}Eem"),
+        ("<a id='alpha  spaced  beta' title=\" alpha\"><span title=x-1 alt=a&amp;b>alpha&#65;<script>if (a < b && c > d) { x = \"</p>\"; }</script>&gt;&quot;</span></a><ul><span id=a&amp;b disabled><HR alt='x &lt; yx &lt; y&lt;'></span>&hellip;  spaced  x &lt; y&#65;</ul>  spaced  <section alt=a&amp;b></section>",
+        "Sa|id=alpha  spaced  beta|title= alpha\u{1}Sspan|title=x-1|alt=a&b\u{1}CalphaA\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C>\"\u{1}Espan\u{1}Ea\u{1}Sul\u{1}Sspan|id=a&b|disabled=\u{1}Shr|alt=x < yx < y<\u{1}Espan\u{1}C\u{2026}  spaced  x < yA\u{1}Eul\u{1}C  spaced  \u{1}Ssection|alt=a&b\u{1}Esection"),
+        ("<input HREF='it&#39;s'/>caf\u{e9}<div data-x=a&amp;b></div><li><b data-x=\"caf\u{e9}q&quot;uote\"><!-- note --></b><a class=plain class=42><script>if (a < b && c > d) { x = \"</p>\"; }</script><!-- <p> --></a><P class='&#65;'>  spaced  x &lt; y<Em id='caf\u{e9} &gt;'><b id=\"&#65;\"></b></Em><a HREF='it&#39;s&#x263A;a &gt; b' data-x=\"beta\"><li title='x &lt; ybetaq\"uote' data-x='&eacute;   spaced  '></li></a></P></li>",
+        "Sinput|href=it's\u{1}Ccaf\u{e9}\u{1}Sdiv|data-x=a&b\u{1}Ediv\u{1}Sli\u{1}Sb|data-x=caf\u{e9}q\"uote\u{1}M note \u{1}Eb\u{1}Sa|class=plain\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}M <p> \u{1}Ea\u{1}Sp|class=A\u{1}C  spaced  x < y\u{1}Sem|id=caf\u{e9} >\u{1}Sb|id=A\u{1}Eb\u{1}Eem\u{1}Sa|href=it's\u{263a}a > b|data-x=beta\u{1}Sli|title=x < ybetaq\"uote|data-x=\u{e9}   spaced  \u{1}Eli\u{1}Ea\u{1}Ep\u{1}Eli"),
+        ("<a disabled></a><!-- a -- b -->x &lt; y&quot;q\"uote&quot;",
+        "Sa|disabled=\u{1}Ea\u{1}M a -- b \u{1}Cx < y\"q\"uote\""),
+        ("\n  spaced  ",
+        "C\n  spaced  "),
+        ("&#x263A;&quot;\n<HR class='&hellip;it&#39;s&eacute;' disabled><span id='  spaced  beta'><span alt=\"x &lt; y&copy;\" HREF=\"it's  spaced  \"><style>p > a { color: red }</style><b><ul title=\" x &lt; y\">it's&gt;</ul></b><!-- note --></span><input id='a &gt; b&amp;&amp;' HREF='a &gt; b  spaced  x &lt; y' /><ul HREF=plain id='&quot;'>&gt;<b data-x=\"caf\u{e9}&eacute;&copy;\"><input/><P>q\"uotealpha&lt;beta  spaced  </P><P title=\"&hellip;\">it'salpha&amp;&copy;&eacute;</P></b>&lt;alpha</ul></span><a></a>",
+        "C\u{263a}\"\n\u{1}Shr|class=\u{2026}it's\u{e9}|disabled=\u{1}Sspan|id=  spaced  beta\u{1}Sspan|alt=x < y\u{a9}|href=it's  spaced  \u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sb\u{1}Sul|title= x < y\u{1}Cit's>\u{1}Eul\u{1}Eb\u{1}M note \u{1}Espan\u{1}Sinput|id=a > b&&|href=a > b  spaced  x < y\u{1}Sul|href=plain|id=\"\u{1}C>\u{1}Sb|data-x=caf\u{e9}\u{e9}\u{a9}\u{1}Sinput\u{1}Sp\u{1}Cq\"uotealpha<beta  spaced  \u{1}Ep\u{1}Sp|title=\u{2026}\u{1}Cit'salpha&\u{a9}\u{e9}\u{1}Ep\u{1}Eb\u{1}C<alpha\u{1}Eul\u{1}Espan\u{1}Sa\u{1}Ea"),
+        ("<span title=\"&copy;&copy;beta\" alt=\"&eacute;&hellip;&quot;\"></span>",
+        "Sspan|title=\u{a9}\u{a9}beta|alt=\u{e9}\u{2026}\"\u{1}Espan"),
+        ("<a id=\"&lt;&hellip;\" id=x-1 disabled>&hellip;&eacute;caf\u{e9}<section alt=\"&amp;\" alt=\"a &gt; bx &lt; y\"></section></a><script>if (a < b && c > d) { x = \"</p>\"; }</script><P>&#65;&#65;it's<div class='&amp;&copy;' data-x=a&amp;b><div></div><style>p > a { color: red }</style>&quot;&quot;a &gt; b</div></P>",
+        "Sa|id=<\u{2026}|disabled=\u{1}C\u{2026}\u{e9}caf\u{e9}\u{1}Ssection|alt=&\u{1}Esection\u{1}Ea\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sp\u{1}CAAit's\u{1}Sdiv|class=&\u{a9}|data-x=a&b\u{1}Sdiv\u{1}Ediv\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}C\"\"a > b\u{1}Ediv\u{1}Ep"),
+        ("<!-- a -- b --><script>if (a < b && c > d) { x = \"</p>\"; }</script>q\"uote",
+        "M a -- b \u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Cq\"uote"),
+        ("<HR id=\"&eacute;\" /><br alt=\"&amp;\" id='q\"uotex &lt; yit&#39;s' /><br class=42 HREF='&gt;&lt; '/><Em alt=\"&lt;alpha\"><Em><P><style>p > a { color: red }</style></P><ul title='&lt;alphaa &gt; b' disabled>\n\n&#x263A;&lt;a &gt; b&#x263A;</ul></Em><script>if (a < b && c > d) { x = \"</p>\"; }</script></Em>",
+        "Shr|id=\u{e9}\u{1}Sbr|alt=&|id=q\"uotex < yit's\u{1}Sbr|class=42|href=>< \u{1}Sem|alt=<alpha\u{1}Sem\u{1}Sp\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Ep\u{1}Sul|title=<alphaa > b|disabled=\u{1}C\n\n\u{263a}<a > b\u{263a}\u{1}Eul\u{1}Eem\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eem"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script><Em data-x='x &lt; y&lt;'><Em data-x=42><script>if (a < b && c > d) { x = \"</p>\"; }</script></Em><!-- a -- b --><br /></Em><Em alt=plain HREF=42><input data-x=plain data-x=42/></Em>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sem|data-x=x < y<\u{1}Sem|data-x=42\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eem\u{1}M a -- b \u{1}Sbr\u{1}Eem\u{1}Sem|alt=plain|href=42\u{1}Sinput|data-x=plain\u{1}Eem"),
+        ("<ul id=\"q&quot;uotebeta\"><HR alt=plain title=\"&eacute;it's\" /><HR id='&copy;a &gt; b' class=\"q&quot;uote\"/><Em class='&eacute;&quot;' class='  alpha'></Em></ul><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sul|id=q\"uotebeta\u{1}Shr|alt=plain|title=\u{e9}it's\u{1}Shr|id=\u{a9}a > b|class=q\"uote\u{1}Sem|class=\u{e9}\"\u{1}Eem\u{1}Eul\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script>&#65;<li alt=\"&#65;\"><input /></li>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}CA\u{1}Sli|alt=A\u{1}Sinput\u{1}Eli"),
+        ("<input id='&hellip;' /><b title='x &lt; y'><section></section></b>&copy;caf\u{e9}q\"uote",
+        "Sinput|id=\u{2026}\u{1}Sb|title=x < y\u{1}Ssection\u{1}Esection\u{1}Eb\u{1}C\u{a9}caf\u{e9}q\"uote"),
+        ("<!DOCTYPE html><input/><section data-x=\"caf\u{e9}\"><section alt=\"&hellip;\"><a data-x=\"it's\" disabled><span id='alphaq\"uote&gt;'>alphacaf\u{e9}it's</span><a HREF=\"&#x263A;a &gt; b\">q\"uote</a></a></section></section><a><span title='it&#39;s&#65;'>&copy;<div><style>p > a { color: red }</style><style>p > a { color: red }</style></div></span><script>if (a < b && c > d) { x = \"</p>\"; }</script><Em>&gt;x &lt; ycaf\u{e9}&eacute;</Em></a><br>",
+        "Dhtml\u{1}Sinput\u{1}Ssection|data-x=caf\u{e9}\u{1}Ssection|alt=\u{2026}\u{1}Sa|data-x=it's|disabled=\u{1}Sspan|id=alphaq\"uote>\u{1}Calphacaf\u{e9}it's\u{1}Espan\u{1}Sa|href=\u{263a}a > b\u{1}Cq\"uote\u{1}Ea\u{1}Ea\u{1}Esection\u{1}Esection\u{1}Sa\u{1}Sspan|title=it'sA\u{1}C\u{a9}\u{1}Sdiv\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Ediv\u{1}Espan\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sem\u{1}C>x < ycaf\u{e9}\u{e9}\u{1}Eem\u{1}Ea\u{1}Sbr"),
+        ("<HR title=\"q&quot;uote\" /><div HREF=x-1 data-x=' a &gt; b&lt;' disabled>&#x263A;&#x263A;alpha</div>",
+        "Shr|title=q\"uote\u{1}Sdiv|href=x-1|data-x= a > b<|disabled=\u{1}C\u{263a}\u{263a}alpha\u{1}Ediv"),
+        ("<Em id='x &lt; y'></Em><section title=\"&gt;\" class=42>  spaced  &lt;&#65;  spaced  <a HREF='it&#39;s &copy;'><div disabled><br data-x=\"beta&quot;\"><!-- note --><div>&quot;</div></div><style>p > a { color: red }</style></a></section>",
+        "Sem|id=x < y\u{1}Eem\u{1}Ssection|title=>|class=42\u{1}C  spaced  <A  spaced  \u{1}Sa|href=it's \u{a9}\u{1}Sdiv|disabled=\u{1}Sbr|data-x=beta\"\u{1}M note \u{1}Sdiv\u{1}C\"\u{1}Ediv\u{1}Ediv\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Ea\u{1}Esection"),
+        ("<span HREF=\"&copy;caf\u{e9}caf\u{e9}\" class='x &lt; y'>&gt;<P><a alt=\"  spaced  &#x263A; \" HREF=plain><script>if (a < b && c > d) { x = \"</p>\"; }</script><ul data-x='  spaced  '><style>p > a { color: red }</style></ul></a><!-- <p> --></P><ul data-x='x &lt; yq\"uote' class=\"it's\"><li class=plain title=x-1></li>&gt;<span id='&eacute;' id=42>x &lt; y&#x263A;q\"uote</span></ul></span><div alt='  spaced  '><a alt=plain></a></div>",
+        "Sspan|href=\u{a9}caf\u{e9}caf\u{e9}|class=x < y\u{1}C>\u{1}Sp\u{1}Sa|alt=  spaced  \u{263a} |href=plain\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sul|data-x=  spaced  \u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Eul\u{1}Ea\u{1}M <p> \u{1}Ep\u{1}Sul|data-x=x < yq\"uote|class=it's\u{1}Sli|class=plain|title=x-1\u{1}Eli\u{1}C>\u{1}Sspan|id=\u{e9}\u{1}Cx < y\u{263a}q\"uote\u{1}Espan\u{1}Eul\u{1}Espan\u{1}Sdiv|alt=  spaced  \u{1}Sa|alt=plain\u{1}Ea\u{1}Ediv"),
+        ("alpha",
+        "Calpha"),
+        ("<img/>&quot;",
+        "Simg\u{1}C\""),
+        ("<!-- a -- b --><P class='caf\u{e9}' HREF='it&#39;s '>alpha&hellip;<span data-x=\"betaalpha\"><!-- <p> --><b HREF=a&amp;b data-x=42><li alt='&gt;&quot;&copy;' disabled>\n&#65;x &lt; yx &lt; y&quot;&#x263A;\n</li></b><input data-x=\"alpha&amp;  spaced  \" /></span><li HREF=\"   spaced  \" title='&amp;&quot;'>it'sq\"uote</li></P>",
+        "M a -- b \u{1}Sp|class=caf\u{e9}|href=it's \u{1}Calpha\u{2026}\u{1}Sspan|data-x=betaalpha\u{1}M <p> \u{1}Sb|href=a&b|data-x=42\u{1}Sli|alt=>\"\u{a9}|disabled=\u{1}C\nAx < yx < y\"\u{263a}\n\u{1}Eli\u{1}Eb\u{1}Sinput|data-x=alpha&  spaced  \u{1}Espan\u{1}Sli|href=   spaced  |title=&\"\u{1}Cit'sq\"uote\u{1}Eli\u{1}Ep"),
+        ("<span><script>if (a < b && c > d) { x = \"</p>\"; }</script><!-- a -- b --></span>",
+        "Sspan\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}M a -- b \u{1}Espan"),
+        ("<input HREF=plain data-x=plain /><span>betait'salphaalpha  spaced  <P title=\"&amp;a &gt; b&lt;\"></P></span>",
+        "Sinput|href=plain|data-x=plain\u{1}Sspan\u{1}Cbetait'salphaalpha  spaced  \u{1}Sp|title=&a > b<\u{1}Ep\u{1}Espan"),
+        ("<span title=\"&eacute;&quot;&quot;\" id='x &lt; y&amp;beta'></span>",
+        "Sspan|title=\u{e9}\"\"|id=x < y&beta\u{1}Espan"),
+        ("<!DOCTYPE html>&eacute;caf\u{e9}alpha",
+        "Dhtml\u{1}C\u{e9}caf\u{e9}alpha"),
+        ("<!DOCTYPE html><Em class='it&#39;s'></Em>&eacute;&#x263A;",
+        "Dhtml\u{1}Sem|class=it's\u{1}Eem\u{1}C\u{e9}\u{263a}"),
+        ("<!DOCTYPE html><section data-x=\"betaalpha\"><br/><ul data-x=42><li></li><span class='&quot;' class='&eacute;&amp;'>alpha&eacute;&gt;</span></ul></section><section class=a&amp;b></section><!-- <p> --><img alt='beta&gt; ' alt='&eacute;&eacute;'>",
+        "Dhtml\u{1}Ssection|data-x=betaalpha\u{1}Sbr\u{1}Sul|data-x=42\u{1}Sli\u{1}Eli\u{1}Sspan|class=\"\u{1}Calpha\u{e9}>\u{1}Espan\u{1}Eul\u{1}Esection\u{1}Ssection|class=a&b\u{1}Esection\u{1}M <p> \u{1}Simg|alt=beta> "),
+        ("<!DOCTYPE html>caf\u{e9}<style>p > a { color: red }</style>",
+        "Dhtml\u{1}Ccaf\u{e9}\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("x &lt; yit'sq\"uote",
+        "Cx < yit'sq\"uote"),
+        ("<div title='&amp;' title='&eacute;&quot;&eacute;'></div><style>p > a { color: red }</style>",
+        "Sdiv|title=&\u{1}Ediv\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle"),
+        ("<img><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Simg\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<Em id=' it&#39;s' class='&amp;'></Em><script>if (a < b && c > d) { x = \"</p>\"; }</script><a>caf\u{e9}  spaced  <img title=' ' HREF=\"beta&gt; \"/><span><span></span><b data-x=plain HREF=\"betax &lt; y&copy;\" disabled><P HREF=\"caf\u{e9}caf\u{e9}\">caf\u{e9}&lt;\nbeta</P></b><b>&copy;beta</b></span></a><HR class=\"&#x263A;q&quot;uote&#x263A;\" />",
+        "Sem|id= it's|class=&\u{1}Eem\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sa\u{1}Ccaf\u{e9}  spaced  \u{1}Simg|title= |href=beta> \u{1}Sspan\u{1}Sspan\u{1}Espan\u{1}Sb|data-x=plain|href=betax < y\u{a9}|disabled=\u{1}Sp|href=caf\u{e9}caf\u{e9}\u{1}Ccaf\u{e9}<\nbeta\u{1}Ep\u{1}Eb\u{1}Sb\u{1}C\u{a9}beta\u{1}Eb\u{1}Espan\u{1}Ea\u{1}Shr|class=\u{263a}q\"uote\u{263a}"),
+        ("<section HREF=a&amp;b disabled></section><li></li>",
+        "Ssection|href=a&b|disabled=\u{1}Esection\u{1}Sli\u{1}Eli"),
+        ("q\"uote\n<style>p > a { color: red }</style><li><img class=a&amp;b HREF='alpha&quot;it&#39;s' />&eacute;it'sbeta</li><!-- a -- b -->",
+        "Cq\"uote\n\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sli\u{1}Simg|class=a&b|href=alpha\"it's\u{1}C\u{e9}it'sbeta\u{1}Eli\u{1}M a -- b "),
+        ("&#65;&copy;<div alt='it&#39;s&copy;' data-x=\"&gt;alpha\"><!-- note --><div></div></div>",
+        "CA\u{a9}\u{1}Sdiv|alt=it's\u{a9}|data-x=>alpha\u{1}M note \u{1}Sdiv\u{1}Ediv\u{1}Ediv"),
+        ("<b><Em class=\"  spaced  &hellip;&gt;\"></Em></b><a data-x=\"x &lt; y&hellip;\" id='caf\u{e9}&gt;&gt;'>a &gt; b&quot;</a><a title=42>&#65;  spaced  &gt;<a class='&gt;caf\u{e9}&hellip;'>x &lt; yalpha<ul></ul></a></a><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sb\u{1}Sem|class=  spaced  \u{2026}>\u{1}Eem\u{1}Eb\u{1}Sa|data-x=x < y\u{2026}|id=caf\u{e9}>>\u{1}Ca > b\"\u{1}Ea\u{1}Sa|title=42\u{1}CA  spaced  >\u{1}Sa|class=>caf\u{e9}\u{2026}\u{1}Cx < yalpha\u{1}Sul\u{1}Eul\u{1}Ea\u{1}Ea\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<br HREF=\"alpha\" HREF=\"&copy;x &lt; yalpha\" /><b HREF=42 title=42><img HREF='a &gt; b' /><script>if (a < b && c > d) { x = \"</p>\"; }</script></b>  spaced  caf\u{e9}",
+        "Sbr|href=alpha\u{1}Sb|href=42|title=42\u{1}Simg|href=a > b\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Eb\u{1}C  spaced  caf\u{e9}"),
+        ("<br alt='&quot;' id=\"&quot;&#65;&lt;\" />&hellip;caf\u{e9}<!-- note --><b alt='beta&quot;' data-x=a&amp;b></b>",
+        "Sbr|alt=\"|id=\"A<\u{1}C\u{2026}caf\u{e9}\u{1}M note \u{1}Sb|alt=beta\"|data-x=a&b\u{1}Eb"),
+        ("<b class='  spaced  &gt;a &gt; b' id=\"&hellip;&hellip;\"><script>if (a < b && c > d) { x = \"</p>\"; }</script><!-- a -- b --></b><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sb|class=  spaced  >a > b|id=\u{2026}\u{2026}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}M a -- b \u{1}Eb\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<b></b>it's&lt;",
+        "Sb\u{1}Eb\u{1}Cit's<"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<P HREF='alphabeta' data-x='&gt;'></P>",
+        "Sp|href=alphabeta|data-x=>\u{1}Ep"),
+        ("<!DOCTYPE html>\na &gt; b&eacute;caf\u{e9}alpha&quot;&#x263A;caf\u{e9}",
+        "Dhtml\u{1}C\na > b\u{e9}caf\u{e9}alpha\"\u{263a}caf\u{e9}"),
+        ("<a HREF=\"it's\"></a><ul HREF=a&amp;b><HR id=\"&#x263A;q&quot;uote&copy;\" class=\"  &amp;\"><ul class='q\"uotebeta&lt;' data-x=\"a &gt; b\"></ul></ul><li id=' ' title=\"&#x263A;q&quot;uote\">caf\u{e9}q\"uote</li><Em id='it&#39;s  spaced  '>alpha  spaced  a &gt; bbeta\n<style>p > a { color: red }</style></Em>",
+        "Sa|href=it's\u{1}Ea\u{1}Sul|href=a&b\u{1}Shr|id=\u{263a}q\"uote\u{a9}|class=  &\u{1}Sul|class=q\"uotebeta<|data-x=a > b\u{1}Eul\u{1}Eul\u{1}Sli|id= |title=\u{263a}q\"uote\u{1}Ccaf\u{e9}q\"uote\u{1}Eli\u{1}Sem|id=it's  spaced  \u{1}Calpha  spaced  a > bbeta\n\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Eem"),
+        ("<!DOCTYPE html><b>it's</b>q\"uote&copy;<!-- note -->&eacute;",
+        "Dhtml\u{1}Sb\u{1}Cit's\u{1}Eb\u{1}Cq\"uote\u{a9}\u{1}M note \u{1}C\u{e9}"),
+        ("<!-- <p> --><script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "M <p> \u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<div><input HREF=plain id=plain/><a class='q\"uotealpha'>\n&eacute;<section><b><input alt='caf\u{e9}beta' HREF=42/></b><div id=\"&gt;\" alt='betacaf\u{e9}x &lt; y'>alpha&gt;&lt;&copy;</div></section><b data-x='&#x263A;x &lt; yq\"uote' title='&hellip;q\"uoteq\"uote'>it's<img disabled /></b></a></div>",
+        "Sdiv\u{1}Sinput|href=plain|id=plain/\u{1}Sa|class=q\"uotealpha\u{1}C\n\u{e9}\u{1}Ssection\u{1}Sb\u{1}Sinput|alt=caf\u{e9}beta|href=42/\u{1}Eb\u{1}Sdiv|id=>|alt=betacaf\u{e9}x < y\u{1}Calpha><\u{a9}\u{1}Ediv\u{1}Esection\u{1}Sb|data-x=\u{263a}x < yq\"uote|title=\u{2026}q\"uoteq\"uote\u{1}Cit's\u{1}Simg|disabled=\u{1}Eb\u{1}Ea\u{1}Ediv"),
+        ("<ul class=\"&eacute;alpha \" alt=plain>  spaced  &#x263A;</ul><!-- a -- b --><b></b>&gt;caf\u{e9}it's",
+        "Sul|class=\u{e9}alpha |alt=plain\u{1}C  spaced  \u{263a}\u{1}Eul\u{1}M a -- b \u{1}Sb\u{1}Eb\u{1}C>caf\u{e9}it's"),
+        ("<input/><Em><a HREF=\"   spaced  &#x263A;\"><input id='alpha'></a></Em>",
+        "Sinput\u{1}Sem\u{1}Sa|href=   spaced  \u{263a}\u{1}Sinput|id=alpha\u{1}Ea\u{1}Eem"),
+        ("<!DOCTYPE html><HR /><b><img class=\"alpha&quot;it's\"/><HR data-x='alpha&copy;alpha' title='it&#39;scaf\u{e9}' />&quot;q\"uoteit's</b>  spaced  x &lt; y&lt;",
+        "Dhtml\u{1}Shr\u{1}Sb\u{1}Simg|class=alpha\"it's\u{1}Shr|data-x=alpha\u{a9}alpha|title=it'scaf\u{e9}\u{1}C\"q\"uoteit's\u{1}Eb\u{1}C  spaced  x < y<"),
+        ("<div HREF=42 id='&#x263A;&eacute;&quot;'><span HREF=a&amp;b><!-- <p> --><span id='&copy;' title='&eacute;a &gt; b'>&gt;beta&gt;</span><script>if (a < b && c > d) { x = \"</p>\"; }</script></span><li class=plain><section class=' it&#39;s'><span id=plain class=x-1>&eacute;it's&quot;</span></section></li><a></a></div>x &lt; y\n&gt;a &gt; bcaf\u{e9}",
+        "Sdiv|href=42|id=\u{263a}\u{e9}\"\u{1}Sspan|href=a&b\u{1}M <p> \u{1}Sspan|id=\u{a9}|title=\u{e9}a > b\u{1}C>beta>\u{1}Espan\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Espan\u{1}Sli|class=plain\u{1}Ssection|class= it's\u{1}Sspan|id=plain|class=x-1\u{1}C\u{e9}it's\"\u{1}Espan\u{1}Esection\u{1}Eli\u{1}Sa\u{1}Ea\u{1}Ediv\u{1}Cx < y\n>a > bcaf\u{e9}"),
+        ("<!DOCTYPE html><HR id=plain /><ul HREF='&copy;' disabled><b><section><section id='x &lt; ya &gt; balpha'>&lt;\nx &lt; y&#65;it's</section></section></b><li><div><div>alpha</div></div><!-- note --><section class=\"alpha\"><Em data-x='&gt;&hellip;' disabled>&#x263A;beta&hellip;<script>if (a < b && c > d) { x = \"</p>\"; }</script><HR></Em></section></li></ul>",
+        "Dhtml\u{1}Shr|id=plain\u{1}Sul|href=\u{a9}|disabled=\u{1}Sb\u{1}Ssection\u{1}Ssection|id=x < ya > balpha\u{1}C<\nx < yAit's\u{1}Esection\u{1}Esection\u{1}Eb\u{1}Sli\u{1}Sdiv\u{1}Sdiv\u{1}Calpha\u{1}Ediv\u{1}Ediv\u{1}M note \u{1}Ssection|class=alpha\u{1}Sem|data-x=>\u{2026}|disabled=\u{1}C\u{263a}beta\u{2026}\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Shr\u{1}Eem\u{1}Esection\u{1}Eli\u{1}Eul"),
+        ("<!DOCTYPE html><span></span><ul><b id='betaalpha' HREF=\"&amp;&quot;a &gt; b\"><P><br /><b data-x=\"&gt;&copy;\" data-x='&#65;caf\u{e9}'>it's&eacute;&#65;</b><HR></P><ul data-x=a&amp;b><div alt='&hellip;  spaced  &amp;' class=\"&copy;beta&gt;\">&gt;beta\n&amp;x &lt; y  spaced  <img></div><Em id=\"&lt;&lt;q&quot;uote\" class='q\"uotex &lt; y&lt;'>  spaced  &quot;&#x263A;&#65;&#65;</Em></ul>alpha&quot;</b></ul>",
+        "Dhtml\u{1}Sspan\u{1}Espan\u{1}Sul\u{1}Sb|id=betaalpha|href=&\"a > b\u{1}Sp\u{1}Sbr\u{1}Sb|data-x=>\u{a9}\u{1}Cit's\u{e9}A\u{1}Eb\u{1}Shr\u{1}Ep\u{1}Sul|data-x=a&b\u{1}Sdiv|alt=\u{2026}  spaced  &|class=\u{a9}beta>\u{1}C>beta\n&x < y  spaced  \u{1}Simg\u{1}Ediv\u{1}Sem|id=<<q\"uote|class=q\"uotex < y<\u{1}C  spaced  \"\u{263a}AA\u{1}Eem\u{1}Eul\u{1}Calpha\"\u{1}Eb\u{1}Eul"),
+        ("<Em>q\"uote&#65;q\"uotecaf\u{e9}&copy;q\"uote<section title='&#65;' id='beta   spaced  '></section></Em><script>if (a < b && c > d) { x = \"</p>\"; }</script><li HREF='q\"uoteq\"uote' disabled></li>",
+        "Sem\u{1}Cq\"uoteAq\"uotecaf\u{e9}\u{a9}q\"uote\u{1}Ssection|title=A|id=beta   spaced  \u{1}Esection\u{1}Eem\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sli|href=q\"uoteq\"uote|disabled=\u{1}Eli"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script><a><HR/><!-- a -- b --></a><!-- a -- b --><span id=x-1><div HREF=x-1 alt=\"beta&amp;\">caf\u{e9}<img id='&gt; ' /><span id=x-1>  spaced  <li class=\"&lt;&hellip;beta\" class=a&amp;b>\n&eacute;&eacute;a &gt; bq\"uote&amp;</li></span></div></span>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Sa\u{1}Shr\u{1}M a -- b \u{1}Ea\u{1}M a -- b \u{1}Sspan|id=x-1\u{1}Sdiv|href=x-1|alt=beta&\u{1}Ccaf\u{e9}\u{1}Simg|id=> \u{1}Sspan|id=x-1\u{1}C  spaced  \u{1}Sli|class=<\u{2026}beta\u{1}C\n\u{e9}\u{e9}a > bq\"uote&\u{1}Eli\u{1}Espan\u{1}Ediv\u{1}Espan"),
+        ("<!DOCTYPE html><br HREF='x &lt; ybetaa &gt; b'>",
+        "Dhtml\u{1}Sbr|href=x < ybetaa > b"),
+        ("<script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<br>x &lt; y",
+        "Sbr\u{1}Cx < y"),
+        ("<!DOCTYPE html>&copy;&copy;alphaa &gt; b<li class=\"alphaa &gt; b  spaced  \"><div HREF='caf\u{e9}it&#39;s'><img /></div><section><li id=a&amp;b disabled><Em disabled>\nit's</Em>it's&amp;it's</li></section><HR disabled></li><Em id='&hellip;' title=\"x &lt; y\" disabled>&eacute;<style>p > a { color: red }</style></Em>",
+        "Dhtml\u{1}C\u{a9}\u{a9}alphaa > b\u{1}Sli|class=alphaa > b  spaced  \u{1}Sdiv|href=caf\u{e9}it's\u{1}Simg\u{1}Ediv\u{1}Ssection\u{1}Sli|id=a&b|disabled=\u{1}Sem|disabled=\u{1}C\nit's\u{1}Eem\u{1}Cit's&it's\u{1}Eli\u{1}Esection\u{1}Shr|disabled=\u{1}Eli\u{1}Sem|id=\u{2026}|title=x < y|disabled=\u{1}C\u{e9}\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Eem"),
+        ("<section></section>caf\u{e9}&lt;<script>if (a < b && c > d) { x = \"</p>\"; }</script>",
+        "Ssection\u{1}Esection\u{1}Ccaf\u{e9}<\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript"),
+        ("<!DOCTYPE html>&#x263A;&amp;it's<P title=plain disabled>&amp;<section data-x=a&amp;b data-x='a &gt; bit&#39;s&eacute;'><ul HREF='beta' alt='x &lt; yx &lt; ycaf\u{e9}'><Em>&hellip;<!-- a -- b --></Em></ul><P data-x=a&amp;b alt=\"&copy;&copy; \"><section title='q\"uote'>&copy;\n&gt;&lt;&quot;</section>betaa &gt; b<b title='&gt;' class=a&amp;b><!-- a -- b --><script>if (a < b && c > d) { x = \"</p>\"; }</script>&hellip;&eacute;  spaced  </b></P></section><li title=a&amp;b alt=\"q&quot;uotebeta&hellip;\"></li></P>",
+        "Dhtml\u{1}C\u{263a}&it's\u{1}Sp|title=plain|disabled=\u{1}C&\u{1}Ssection|data-x=a&b\u{1}Sul|href=beta|alt=x < yx < ycaf\u{e9}\u{1}Sem\u{1}C\u{2026}\u{1}M a -- b \u{1}Eem\u{1}Eul\u{1}Sp|data-x=a&b|alt=\u{a9}\u{a9} \u{1}Ssection|title=q\"uote\u{1}C\u{a9}\n><\"\u{1}Esection\u{1}Cbetaa > b\u{1}Sb|title=>|class=a&b\u{1}M a -- b \u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}C\u{2026}\u{e9}  spaced  \u{1}Eb\u{1}Ep\u{1}Esection\u{1}Sli|title=a&b|alt=q\"uotebeta\u{2026}\u{1}Eli\u{1}Ep"),
+        ("x &lt; y&eacute;caf\u{e9}",
+        "Cx < y\u{e9}caf\u{e9}"),
+        ("<li><section HREF='betaq\"uote'><style>p > a { color: red }</style><span title=\"&eacute;x &lt; yalpha\" title=x-1><style>p > a { color: red }</style>betax &lt; y</span><b alt=plain data-x=a&amp;b disabled><span>&lt;<script>if (a < b && c > d) { x = \"</p>\"; }</script>q\"uote&#65;&#x263A;</span><Em>&eacute;  spaced  beta</Em>alphaa &gt; b</b></section><br HREF=x-1><div disabled></div></li>",
+        "Sli\u{1}Ssection|href=betaq\"uote\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Sspan|title=\u{e9}x < yalpha\u{1}Sstyle\u{1}Cp > a { color: red }\u{1}Estyle\u{1}Cbetax < y\u{1}Espan\u{1}Sb|alt=plain|data-x=a&b|disabled=\u{1}Sspan\u{1}C<\u{1}Sscript\u{1}Cif (a < b && c > d) { x = \"</p>\"; }\u{1}Escript\u{1}Cq\"uoteA\u{263a}\u{1}Espan\u{1}Sem\u{1}C\u{e9}  spaced  beta\u{1}Eem\u{1}Calphaa > b\u{1}Eb\u{1}Esection\u{1}Sbr|href=x-1\u{1}Sdiv|disabled=\u{1}Ediv\u{1}Eli")]
+
+@test
+fn test_every_document_reads_as_python_reads_it() [io]
+    var n = 0
+    for row in rows()
+        let (source, want) = row
+        n = n + 1
+        test.case("row ${n}")
+        test.assert_eq_str(tokens_text(source), want)

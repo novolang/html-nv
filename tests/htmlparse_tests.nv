@@ -1,19 +1,10 @@
-// htmlparse_tests.nv — the API suite for the tokenizer and the tree.
+// htmlparse_tests.nv — the tokenizer and the tree, through the public
+// calls.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: html-nv.htmlparse.<fn>`.
-//
-// THE TOKENIZER CASES ARE html5lib-tests' OWN.  That suite —
-// `tokenizer/*.test` — is a list of inputs with the exact token
-// sequence each must produce, and it is the oracle every HTML parser
-// is measured against.  The cases below are quoted from it, and the
-// whole suite becomes a generated run beside this one when the
-// implementation lands.
-//
-// THE TREE CASES ARE THE FOUR REFUSALS.  This package implements a
-// NAMED SUBSET of tree construction, and the last test is the one that
-// keeps the subset honest: each refused construct has to raise
-// `IssueUnsupportedConstruct`, not be silently approximated.
+// The tokenizer cases are quoted from html5lib-tests, which
+// tests/html5lib_tokenizer_tests.nv runs whole.  The tree cases include
+// the four constructs this package does not implement, each of which
+// must raise `IssueUnsupportedConstruct`.
 
 use std.test
 use std.list
@@ -70,9 +61,8 @@ fn test_the_tokenizer_emits_the_tokens_the_suite_expects() [io]
 
 @test
 fn test_self_closing_is_honoured_where_the_spec_says_and_nowhere_else() [io]
-    // The one that surprises everybody: `<div/>` is a start tag with a
-    // self-closing flag that is reported and IGNORED, because `div` is
-    // not a void element.
+    // `<div/>` is a start tag with a self-closing flag, which is
+    // reported and ignored because `div` is not a void element.
     test.case("a void element's slash is accepted")
     let br = tokens("<br/>")
     test.assert(list.len(br) == 2)
@@ -83,10 +73,7 @@ fn test_self_closing_is_honoured_where_the_spec_says_and_nowhere_else() [io]
 
 @test
 fn test_raw_text_elements_have_no_markup_inside_them() [io]
-    // `script`, `style`, `textarea` and `title`.  A `<` inside one of
-    // them is a `<`, which is why they need their own tokenizer states
-    // — and why a sanitiser that removes a `<script>` must remove its
-    // CONTENTS rather than unwrap it.
+    // A `<` inside `script`, `style`, `textarea` or `title` is a `<`.
     test.case("a tag inside script is text")
     let s = tokens("<script><b>x</b></script>")
     test.assert(list.len(s) == 4)
@@ -108,8 +95,7 @@ fn test_raw_text_elements_have_no_markup_inside_them() [io]
 @test
 fn test_a_bogus_comment_is_a_comment_and_not_an_error() [io]
     // html5lib-tests' `test1.test`: `<?php ?>` and `</ >` are both
-    // bogus comments.  A tolerant parser has no errors, only
-    // recoveries.
+    // bogus comments.
     test.case("a processing instruction becomes a comment")
     let pi = tokens("<?php echo 1; ?>")
     match list.get(pi, 0).kind
@@ -128,9 +114,7 @@ fn test_a_bogus_comment_is_a_comment_and_not_an_error() [io]
 
 @test
 fn test_implied_end_tags_are_what_tolerant_means() [io]
-    // The half of tree construction this package DOES implement, and
-    // the reason anyone wants a tolerant parser at all: real HTML does
-    // not close its `<li>`s.
+    // Real HTML leaves its `<li>`s open.
     test.case("a list item closes when the next one opens")
     let doc = htmlparse.parse("<ul><li>a<li>b</ul>")
     let ul = list.get(htmltree.children(doc, htmltree.root(doc)), 0)
@@ -146,8 +130,7 @@ fn test_implied_end_tags_are_what_tolerant_means() [io]
 
 @test
 fn test_a_stray_end_tag_is_dropped_and_reported() [io]
-    // Never fatal, never silent.  A validator wants to know; a scraper
-    // does not.
+    // Never fatal, and always reported.
     let doc = htmlparse.parse("<p>a</b></p>")
 
     test.case("the document still parses")
@@ -167,9 +150,7 @@ fn test_a_stray_end_tag_is_dropped_and_reported() [io]
 
 @test
 fn test_the_four_refusals_are_reported_rather_than_approximated() [io]
-    // THE TEST THAT KEEPS THE SUBSET HONEST.  A reader who needs any
-    // of these four needs a browser engine, and should learn that from
-    // a named issue rather than from a rendering that is subtly wrong.
+    // Each construct outside the subset is reported where it appears.
     test.case("misnested formatting — the adoption agency algorithm")
     let misnested = htmlparse.parse("<b>a<i>b</b>c</i>")
     test.assert(has_unsupported(misnested))
@@ -198,9 +179,8 @@ fn has_unsupported(doc: htmltree.HtmlDoc) -> Bool
 
 @test
 fn test_a_fragment_is_parsed_in_the_context_it_will_live_in() [io]
-    // The case a sanitiser actually has.  A README's rendered HTML is
-    // not a document, and parsing it as one adds an `<html>` and a
-    // `<body>` nobody asked for.
+    // A rendered README is a fragment, parsed as the contents of an
+    // element.
     test.case("a fragment gets no implied document structure")
     let frag = htmlparse.parse_fragment("<p>a</p>", "div")
     let kids = htmltree.children(frag, htmltree.root(frag))
@@ -214,8 +194,7 @@ fn test_a_fragment_is_parsed_in_the_context_it_will_live_in() [io]
 
 @test
 fn test_the_parser_is_bounded() [io]
-    // The pathological input is a file of 100,000 `<div>`s and it is
-    // two lines to write.
+    // The pathological input is a file of 100,000 `<div>`s.
     test.case("the default bounds are ones no real document reaches")
     let l = htmlparse.default_limits()
     test.assert(l.max_depth == 512)
@@ -249,9 +228,7 @@ fn test_the_tree_answers_the_questions_a_scraper_asks() [io]
 
 @test
 fn test_a_recovery_can_be_pointed_at_and_printed() [io]
-    // A parser that recovered silently would be a parser nobody could
-    // debug; one whose issues have no position would be one nobody
-    // could act on.
+    // Every issue has a position.
     let doc = htmlparse.parse("<p>a\n</b>\n")
 
     test.case("the issue's offset resolves to a line a linter can print")
@@ -283,8 +260,7 @@ fn test_a_caller_can_narrow_the_bounds_and_start_the_tokenizer_anywhere() [io]
 
 @test
 fn test_script_and_style_contents_are_not_inner_text() [io]
-    // A search index or an excerpt that included them would index a
-    // stylesheet.
+    // A stylesheet is not text a reader sees.
     let doc = htmlparse.parse("<div>a<style>p{color:red}</style>b</div>")
     let div = list.get(htmltree.children(doc, htmltree.root(doc)), 0)
 

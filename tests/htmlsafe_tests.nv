@@ -1,12 +1,8 @@
-// htmlsafe_tests.nv — the API suite for escaping and sanitising.
+// htmlsafe_tests.nv — escaping and sanitising.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
-// THE CASES ARE THE ONES A SANITISER IS ACTUALLY ATTACKED WITH, and
-// every one of them is a case the novo-lang registry's current
-// substring-based `sanitize_hrefs` either handles by accident or would
-// not handle at all if the renderer in front of it changed.  A
-// sanitiser suite made of well-formed documents proves nothing.
+// The cases are the ones a sanitiser is attacked with: the spellings
+// of `javascript:`, event-handler attributes, and the raw-text
+// elements that cannot be unwrapped.
 
 use std.test
 use std.list
@@ -22,9 +18,7 @@ fn clean(source: Str, allow: htmlsafe.HtmlAllowList) -> Str [io]
 
 @test
 fn test_escaping_is_five_characters_and_two_functions() [io]
-    // Two functions rather than one with a flag, because choosing the
-    // wrong one is the bug and a reader of a call site should be able
-    // to see which was chosen.
+    // Two functions, so that a call site shows which escape it chose.
     test.case("element content escapes three")
     test.assert(htmlsafe.escape_text_str("a<b>&c") == "a&lt;b&gt;&amp;c")
 
@@ -63,16 +57,16 @@ fn test_unescaping_follows_the_html5_rules_including_the_odd_ones() [io]
             test.assert(false)
         Some(cs) =>
             test.assert(list.len(cs) == 2)
-    test.assert(htmlsafe.named_reference("amp") == Some([0x26]))
+    match htmlsafe.named_reference("amp")
+        Some(cs) => test.assert(cs == ['&'])
+        None     => test.fail("amp is a reference")
     test.assert(htmlsafe.named_reference("nosuch") == None)
 
 @test
 fn test_a_javascript_url_is_refused_however_it_is_spelled() [io]
-    // THE CHECK A SUBSTRING TEST CANNOT MAKE.  A browser strips
-    // leading whitespace and C0 controls from a URL and decodes
-    // character references before it looks at the scheme, so all four
-    // of these are `javascript:` to a browser and none of them is to a
-    // `starts_with`.
+    // A browser strips leading whitespace and C0 controls from a URL
+    // and decodes character references before it reads the scheme, so
+    // each of these is `javascript:` to a browser.
     let allow = htmlsafe.allow_readme()
 
     test.case("the plain spelling")
@@ -95,8 +89,7 @@ fn test_a_javascript_url_is_refused_however_it_is_spelled() [io]
 
 @test
 fn test_the_four_shapes_a_published_document_may_link_to_survive() [io]
-    // The registry's own allow-list: http, https, mailto, a fragment,
-    // a site-absolute path.
+    // http, https, mailto, a fragment and a site-absolute path.
     let allow = htmlsafe.allow_readme()
 
     test.case("the schemes")
@@ -114,11 +107,8 @@ fn test_the_four_shapes_a_published_document_may_link_to_survive() [io]
 
 @test
 fn test_sanitising_is_a_tree_operation_and_that_is_the_whole_argument() [io]
-    // The registry rewrites `href="` occurrences by searching rendered
-    // HTML.  That is exact only because the renderer in front of it
-    // escapes the whole document first and emits an href from exactly
-    // one place.  On a tree, "every `a` element's `href`" is a thing
-    // you can say.
+    // On a tree, "every `a` element's `href`" can be said, and the same
+    // bytes in a code sample or in text are left alone.
     let allow = htmlsafe.allow_readme()
 
     test.case("an href attribute is rewritten")
@@ -137,9 +127,8 @@ fn test_sanitising_is_a_tree_operation_and_that_is_the_whole_argument() [io]
 
 @test
 fn test_a_refused_element_is_unwrapped_and_a_script_is_stripped() [io]
-    // Unwrapping keeps the document readable after a `<font>` goes.
-    // A `<script>` cannot be unwrapped: its contents are raw text, so
-    // unwrapping would leave the code on the page as prose.
+    // A `<script>` cannot be unwrapped: its contents would stay on the
+    // page as text.
     let allow = htmlsafe.allow_readme()
 
     test.case("an element not on the list goes, and its children stay")
@@ -158,8 +147,7 @@ fn test_a_refused_element_is_unwrapped_and_a_script_is_stripped() [io]
 
 @test
 fn test_an_event_handler_attribute_never_survives() [io]
-    // The other half of the script problem, and the one a scheme
-    // allow-list does not touch at all.
+    // A scheme check does not reach these attributes.
     let allow = htmlsafe.allow_readme()
 
     test.case("onclick goes")
@@ -181,8 +169,7 @@ fn test_an_event_handler_attribute_never_survives() [io]
 
 @test
 fn test_the_allow_lists_are_values_a_caller_modifies() [io]
-    // Four callers want four lists and the difference between them is
-    // data, not flags.
+    // The lists are values a caller changes one line at a time.
     test.case("allow_none keeps no elements — the document's text, with markup gone")
     let none = clean("<p><em>a</em></p>", htmlsafe.allow_none())
     test.assert(str.contains(none, "<p") == false)
@@ -219,14 +206,12 @@ fn test_the_allow_lists_are_values_a_caller_modifies() [io]
 
 @test
 fn test_the_appending_forms_are_what_a_page_builder_uses() [io]
-    // Every function here that produces bytes appends to the caller's
-    // buffer, so a page is assembled in one allocation rather than one
-    // per fragment.
+    // Each answers the list it was given with the bytes appended.
     test.case("the escapes append")
     let out = htmlsafe.escape_text([], "a<b")
-    test.assert(list.len(out) == 7)
+    test.assert(list.len(out) == 6)
     let out2 = htmlsafe.escape_attr(out, "\"")
-    test.assert(list.len(out2) == 13)
+    test.assert(list.len(out2) == 12)
 
     test.case("and so does the unescape")
     let back = htmlsafe.unescape_into([], "&amp;")
@@ -234,9 +219,7 @@ fn test_the_appending_forms_are_what_a_page_builder_uses() [io]
 
 @test
 fn test_a_sanitiser_can_say_what_it_would_remove_before_it_removes_it() [io]
-    // For a publisher's preview.  A sanitiser that only produced a
-    // cleaned document is one nobody could explain to a user whose
-    // content disappeared.
+    // For a publisher's preview of what will be dropped.
     let doc = htmlparse.parse_fragment("<p onclick=\"x\">a</p><script>y</script>",
                                        "div")
 
@@ -249,7 +232,6 @@ fn test_a_sanitiser_can_say_what_it_would_remove_before_it_removes_it() [io]
 
 @test
 fn test_an_external_link_gets_the_rel_a_site_serving_other_people_s_links_wants() [io]
-    // Leaving it to the caller is how it gets forgotten.
     let allow = htmlsafe.allow_readme()
 
     test.case("an external link carries the rel")

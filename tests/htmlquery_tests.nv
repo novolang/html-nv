@@ -1,13 +1,8 @@
-// htmlquery_tests.nv — the API suite for finding nodes, and for the
-// serialiser's round-trip property.
+// htmlquery_tests.nv — finding nodes, and the serialiser's round-trip
+// property.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
-// THE REFUSALS ARE TESTED AS HARD AS THE ACCEPTANCES.  A selector
-// engine that accepted `:nth-child(2n)` and matched nothing would
-// leave a caller debugging their document instead of their selector,
-// so every pseudo-class outside the subset has to come back as a named
-// error with a position.
+// Every pseudo-class outside the subset must come back as a named
+// error with a position, not as a selector that matches nothing.
 
 use std.test
 use std.list
@@ -19,12 +14,10 @@ use htmlwrite
 fn doc_of(source: Str) -> htmltree.HtmlDoc [io]
     htmlparse.parse_fragment(source, "div")
 
+// A compiled selector; a selector that does not compile fails the test.
 fn sel(s: Str) -> htmlquery.HtmlSelector [io]
-    match htmlquery.compile(s)
-        Err(_) =>
-            todo("htmlquery_tests.sel — the selector did not compile")
-        Ok(c)  =>
-            c
+    let compiled = htmlquery.compile(s)!
+    compiled
 
 @test
 fn test_the_small_surface_needs_no_parser_and_cannot_be_misspelled() [io]
@@ -139,9 +132,8 @@ fn test_a_malformed_selector_says_where_it_gave_up() [io]
 
 @test
 fn test_matching_is_from_the_node_upwards() [io]
-    // Which is why a selector can be matched against a single node
-    // without walking the tree from the root, and why `closest` is one
-    // function rather than a search.
+    // So one node can be matched without walking the tree from the
+    // root.
     let doc = doc_of("<table><tr><td class=\"c\">x</td></tr></table>")
     let r = htmltree.root(doc)
     let cell = htmlquery.select(doc, r, sel(".c"))
@@ -161,10 +153,9 @@ fn test_matching_is_from_the_node_upwards() [io]
 
 @test
 fn test_the_round_trip_is_not_an_identity_and_the_promise_is_narrower() [io]
-    // `serialize(parse(s))` is not `s` and cannot be: the parser
-    // closed what the document left open and lowercased the names.
-    // What IS promised is that the result parses to the same tree —
-    // and that is the property a sanitiser depends on.
+    // `serialize(parse(s))` is not `s`: the parser closed what the
+    // document left open and lowered the names.  The result parses to
+    // the same tree.
     let source = "<P CLASS=\"x\">a<br>b"
     let once = doc_of(source)
     let text = htmlwrite.serialize_str(once, htmlwrite.default_options())
@@ -226,9 +217,7 @@ fn test_serialising_a_fragment_is_a_different_call_from_the_whole_node() [io]
 
 @test
 fn test_a_caller_building_a_page_writes_tags_with_the_same_escape() [io]
-    // A template engine or a site generator emits tags of its own, and
-    // a second implementation of attribute escaping is a second place
-    // to get it wrong.
+    // A template engine writes tags of its own with the same escape.
     let o = htmlwrite.default_options()
 
     test.case("a start tag, with its attributes escaped")
