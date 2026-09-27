@@ -6,7 +6,6 @@ use std.test
 use std.str
 use htmlparse
 use htmltree
-use htmlwrite
 
 // A document's element tree as text: each element's tag and its
 // children in brackets, text as itself.
@@ -192,9 +191,7 @@ fn test_the_recoveries_are_reported() [io]
     test.assert_eq_str(issue_letters("<a>1<a>2</a></a>"), "X")
     test.case("each recovery prints on its line")
     let doc = htmlparse.parse("<div>\n<p id=a><p id=a>\n<b/></b>&#0;\n</x><svg></svg>")
-    var lines: [Str] = []
-    for issue in doc.issues
-        lines = list.push(lines, htmlparse.issue_text(doc, issue))
+    let lines = list.map(doc.issues, issue => htmlparse.issue_text(doc, issue))
     test.assert_eq_str(str.join(lines, "|"),
         "line 2: the id \"a\" is used twice|line 3: <b/> is not a void element, so the slash is ignored|line 3: a character reference is not well-formed|line 4: </x> closes nothing and was dropped|line 4: \"svg\" needs a part of HTML's tree construction this parser does not implement|line 1: <div> was not closed")
     test.assert(htmlparse.line_of(doc, 10000) == 4)

@@ -65,9 +65,8 @@ fn dump_attrs(doc: HtmlDoc, index: Int, level: Int, start: [Str]) -> [Str]
         _                     => ()
     names = list.sort(names)
     let pad = "| " + str.repeat("  ", level)
-    for name in names
-        lines = list.push(lines, pad + name + "=\"" + (htmltree.attr(doc, index, name) ?? "") + "\"")
-    lines
+    list.concat(lines,
+        list.map(names, name => pad + name + "=\"" + (htmltree.attr(doc, index, name) ?? "") + "\""))
 
 // The document an input parses to, in a context or as a whole.
 fn parsed(input: Str, context: Str) -> HtmlDoc

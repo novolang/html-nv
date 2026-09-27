@@ -127,10 +127,10 @@ pub fn allow_readme() -> HtmlAllowList []
         attrs: ["src", "alt", "title", "width", "height"],
         url_attrs: ["src"] })
     rules = list.push(rules, HtmlAttrRule { tag: "code", attrs: ["class"], url_attrs: [] })
-    for h in ["h1", "h2", "h3", "h4", "h5", "h6"]
-        rules = list.push(rules, HtmlAttrRule { tag: h, attrs: ["id"], url_attrs: [] })
-    for cell in ["th", "td"]
-        rules = list.push(rules, HtmlAttrRule { tag: cell, attrs: ["align", "colspan", "rowspan"], url_attrs: [] })
+    rules = list.concat(rules, list.map(["h1", "h2", "h3", "h4", "h5", "h6"],
+        h => HtmlAttrRule { tag: h, attrs: ["id"], url_attrs: [] }))
+    rules = list.concat(rules, list.map(["th", "td"],
+        cell => HtmlAttrRule { tag: cell, attrs: ["align", "colspan", "rowspan"], url_attrs: [] }))
     HtmlAllowList {
         tags: list.concat(basic.tags, extra), attrs: rules, url_schemes: basic.url_schemes,
         allow_relative_urls: true, refused_url: "#", strip_contents_of: stripped(),

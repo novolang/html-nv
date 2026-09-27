@@ -156,7 +156,6 @@ def main():
 use std.test
 use std.str
 use htmlparse
-use htmltree
 use htmlentity
 
 // The expected-token string of a tokenizer's tokens.
