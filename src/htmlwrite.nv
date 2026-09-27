@@ -1,69 +1,234 @@
-// htmlwrite.nv — a tree back out as HTML, appended to a buffer the
-// caller owns.
+// htmlwrite.nv — a tree back out as HTML.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// The output follows the HTML fragment serialisation algorithm (WHATWG
+// HTML section 13.3).  A text node's `&`, `<` and `>` are escaped, and
+// an attribute value's `"` and `'` as well, so the output parses back
+// to the tree it came from.  The text inside `script`, `style`, `xmp`,
+// `iframe`, `noembed`, `noframes` and `plaintext` is written as it is,
+// because it is not markup.
+//
+// `serialize(parse(s))` is not `s`.  The parser closed what the
+// document left open, lowered the names and resolved the character
+// references.  What holds is that `parse(serialize(parse(s)))` has the
+// same tree as `parse(s)`.
+//
+// The functions that take a byte list answer it with the output
+// appended; the list passed in is not changed.
 
+use std.str
+use std.bytes
 use htmltree
-
-// NOTHING HERE WRITES.  Every function takes the buffer to append to
-// and returns it — so a caller serialises a hundred fragments into one
-// buffer and writes once, and a test asserts on bytes with no file
-// anywhere.
-//
-// THE ROUND TRIP IS NOT AN IDENTITY, AND SAYING SO IS THE POINT.
-// `serialize(parse(s))` is not `s`, and cannot be: the parser closed
-// what the document left open, dropped what it could not place,
-// lowercased the tag names and resolved the character references.
-// What IS promised is that the result parses to the same tree —
-// `parse(serialize(parse(s)))` has the same nodes as `parse(s)` — and
-// that is the property the suite checks, because it is the one a
-// sanitiser depends on.  A sanitiser whose output re-parsed to
-// something else would be a sanitiser that could be talked out of its
-// own policy.
-//
-// SERIALISING IS WHERE ESCAPING HAPPENS, and it is not optional.  A
-// text node's `&` becomes `&amp;` and an attribute's `"` becomes
-// `&quot;` on the way out, always, because the alternative is a
-// serialiser that can emit a document that does not parse back to
-// itself — which is the same hole as not escaping at all.  The raw
-// text elements are the exception the spec carves out: `<script>` and
-// `<style>` contents are emitted verbatim, because escaping them would
-// change the code.
+use htmlentity
 
 // HtmlWriteOptions is how the output differs from the plain form.
 pub struct HtmlWriteOptions
-    // Close void elements as `<br />` rather than `<br>`.  Off by
-    // default; on for XHTML, EPUB, or an XML consumer.
+    // Write a void element as `<br />` rather than `<br>`, for an XML
+    // reader such as an EPUB one.
     xhtml: Bool
-    // Emit a `<!DOCTYPE html>` before the document.  Off by default,
-    // because most callers are serialising a FRAGMENT and a doctype
-    // inside one is invalid.
+    // Write `<!DOCTYPE html>` first when the document has no doctype of
+    // its own.  A doctype the document has is always written.
     doctype: Bool
-    // Emit comments.  On by default here even though `allow_none`
-    // drops them at the sanitising step: serialising is not
-    // sanitising, and a serialiser that silently dropped part of its
-    // input would make the round-trip property untrue.
+    // Write comments.
     comments: Bool
-    // Indent nested elements by this many spaces, and put each on its
-    // own line.  0 for none, which is the default: indenting changes
-    // what a document MEANS wherever whitespace is significant —
-    // inside a `<pre>`, and between two inline elements — so a
-    // pretty-printer is for reading, never for publishing.
+    // Put each child of an element that has element or comment children
+    // on a line of its own, indented by this many spaces per level, and
+    // leave out text there that is only whitespace.  Nothing inside a
+    // `pre`, `textarea` or `listing` is indented.  0 writes the tree as it is.  Indenting changes the
+    // text of a document, so it is for reading and not for publishing.
     indent: Int
 
-// default_options is compact output: no doctype, no indent, comments
-// kept, HTML rather than XHTML syntax.
-pub fn default_options() -> HtmlWriteOptions []
-    todo("html-nv.htmlwrite.default_options")
-
-// pretty_options is `default_options` with two-space indentation.
+// default_options is the plain form: no added doctype, no indent,
+// comments written, HTML syntax.
 //
-// For a diff, a fixture, or a human reading the output of a
-// transform.  Never for publishing: see `indent`.
-pub fn pretty_options() -> HtmlWriteOptions []
-    todo("html-nv.htmlwrite.pretty_options")
+// ```novo
+// use htmlwrite
+//
+// fn main() [io]
+//     println("${htmlwrite.default_options().comments}")   // true
+// ```
+pub fn default_options() -> HtmlWriteOptions []
+    HtmlWriteOptions { xhtml: false, doctype: false, comments: true, indent: 0 }
 
-// serialize appends a whole document.
+// pretty_options is `default_options` with an indent of two spaces.
+//
+// ```novo
+// use htmlwrite
+//
+// fn main() [io]
+//     println("${htmlwrite.pretty_options().indent}")   // 2
+// ```
+pub fn pretty_options() -> HtmlWriteOptions []
+    HtmlWriteOptions { xhtml: false, doctype: false, comments: true, indent: 2 }
+
+// The bytes of a string.
+fn wire(s: Str) -> [u8]
+    bytes.to_byte_list(bytes.from_str(s))
+
+// Whether an element's text children are written as they are.
+fn verbatim(tag: Str) -> Bool
+    tag == "script" or tag == "style" or tag == "xmp" or tag == "iframe" or tag == "noembed" or tag == "noframes" or tag == "plaintext"
+
+// Appends text with `&`, `<` and `>` escaped.
+fn put_text(sb: Int, text: Str)
+    for i in 0..str.len(text)
+        let b = str.byte_at_or(text, i, 0)
+        if b == '&'
+            let _ = str.builder_append(sb, "&amp;")
+        else if b == '<'
+            let _ = str.builder_append(sb, "&lt;")
+        else if b == '>'
+            let _ = str.builder_append(sb, "&gt;")
+        else
+            str.builder_append_char(sb, b)
+
+// Appends an attribute value with `&`, `<`, `>`, `"` and `'` escaped.
+fn put_attr(sb: Int, text: Str)
+    for i in 0..str.len(text)
+        let b = str.byte_at_or(text, i, 0)
+        if b == '"'
+            let _ = str.builder_append(sb, "&quot;")
+        else if b == '\''
+            let _ = str.builder_append(sb, "&#39;")
+        else if b == '&'
+            let _ = str.builder_append(sb, "&amp;")
+        else if b == '<'
+            let _ = str.builder_append(sb, "&lt;")
+        else if b == '>'
+            let _ = str.builder_append(sb, "&gt;")
+        else
+            str.builder_append_char(sb, b)
+
+// Appends a line break and the indent of a level.
+fn put_indent(sb: Int, options: HtmlWriteOptions, level: Int)
+    str.builder_append_char(sb, '\n')
+    for k in 0..options.indent * level
+        str.builder_append_char(sb, ' ')
+
+// Whether a node is text that is only whitespace.
+fn blank_text(doc: htmltree.HtmlDoc, index: Int) -> Bool
+    match doc.nodes[index].kind
+        HtmlText(r, _) =>
+            for i in r.start..r.end
+                let b = str.byte_at_or(doc.source, i, 0)
+                if not (b == ' ' or b == '\n' or b == '\t' or b == 12)
+                    return false
+            true
+        _              => false
+
+// Appends a node and everything under it.
+fn put_node(sb: Int, doc: htmltree.HtmlDoc, index: Int, options: HtmlWriteOptions, level: Int,
+            raw: Bool)
+    match doc.nodes[index].kind
+        HtmlDocument              =>
+            let _ = put_children(sb, doc, index, options, level, false)
+        HtmlText(r, _)            =>
+            if raw
+                let _ = str.builder_append(sb, str.slice(doc.source, r.start, r.end))
+            else
+                put_text(sb, htmltree.text_of(doc, index))
+        HtmlComment(r)            =>
+            if options.comments
+                let _ = str.builder_append(sb, "<!--" + str.slice(doc.source, r.start, r.end) + "-->")
+        HtmlDoctype(r)            =>
+            let _ = str.builder_append(sb, "<!DOCTYPE " + str.slice(doc.source, r.start, r.end) + ">")
+        HtmlElement(tag_r, attrs) =>
+            let tag = str.slice(doc.source, tag_r.start, tag_r.end)
+            let _ = str.builder_append(sb, "<" + tag)
+            for a in attrs
+                let _ = str.builder_append(sb, " " + str.slice(doc.source, a.name.start, a.name.end) + "=\"")
+                if a.needs_decoding
+                    put_attr(sb, htmlentity.decode_scan(doc.source, a.value.start, a.value.end, true).text)
+                else
+                    put_attr(sb, str.slice(doc.source, a.value.start, a.value.end))
+                str.builder_append_char(sb, '"')
+            if htmltree.childless(tag)
+                if options.xhtml
+                    let _ = str.builder_append(sb, " />")
+                else
+                    str.builder_append_char(sb, '>')
+                return
+            str.builder_append_char(sb, '>')
+            if tag == "pre" or tag == "textarea" or tag == "listing"
+                let first = doc.nodes[index].first_child
+                if first != NO_NODE and starts_with_lf(doc, first)
+                    str.builder_append_char(sb, '\n')
+            var inner = options
+            if tag == "pre" or tag == "textarea" or tag == "listing"
+                inner = HtmlWriteOptions { xhtml: options.xhtml,
+                    doctype: options.doctype,
+                    comments: options.comments,
+                    indent: 0 }
+            let wrote = put_children(sb, doc, index, inner, level + 1, verbatim(tag))
+            if wrote
+                put_indent(sb, options, level)
+            let _ = str.builder_append(sb, "</" + tag + ">")
+
+// Whether a node is text whose first character is a line feed.
+fn starts_with_lf(doc: htmltree.HtmlDoc, index: Int) -> Bool
+    match doc.nodes[index].kind
+        HtmlText(_, _) => str.starts_with(htmltree.text_of(doc, index), "\n")
+        _              => false
+
+// Whether a node has an element or a comment among its children.
+fn has_markup_child(doc: htmltree.HtmlDoc, index: Int) -> Bool
+    var c = doc.nodes[index].first_child
+    while c != NO_NODE
+        match doc.nodes[c].kind
+            HtmlText(_, _) => ()
+            _              =>
+                return true
+        c = doc.nodes[c].next_sibling
+    false
+
+// Appends a node's children, and answers whether any of them was put on
+// a line of its own.  Indenting applies only to a node with an element
+// or a comment among its children, so text alone stays on its
+// element's line.
+fn put_children(sb: Int, doc: htmltree.HtmlDoc, index: Int, options: HtmlWriteOptions, level: Int,
+                raw: Bool) -> Bool
+    let pretty = options.indent > 0 and not raw and has_markup_child(doc, index)
+    var broke = false
+    var c = doc.nodes[index].first_child
+    while c != NO_NODE
+        if pretty and blank_text(doc, c)
+            c = doc.nodes[c].next_sibling
+            continue
+        if pretty and index != 0
+            put_indent(sb, options, level)
+            broke = true
+        else if pretty and c != doc.nodes[index].first_child
+            str.builder_append_char(sb, '\n')
+        put_node(sb, doc, c, options, level, raw)
+        c = doc.nodes[c].next_sibling
+    broke
+
+// Whether a document has a doctype node.
+fn has_doctype(doc: htmltree.HtmlDoc) -> Bool
+    for c in htmltree.children(doc, 0)
+        match doc.nodes[c].kind
+            HtmlDoctype(_) =>
+                return true
+            _              => ()
+    false
+
+// A node written to a string.
+fn written(doc: htmltree.HtmlDoc, index: Int, options: HtmlWriteOptions, children_only: Bool) -> Str
+    let sb = str.builder_new()
+    if index == 0 and options.doctype and not has_doctype(doc)
+        let _ = str.builder_append(sb, "<!DOCTYPE html>")
+        if options.indent > 0
+            str.builder_append_char(sb, '\n')
+    if index >= 0 and index < list.len(doc.nodes)
+        if children_only
+            let tag = htmltree.tag_name(doc, index)
+            let _ = put_children(sb, doc, index, options, 0, verbatim(tag))
+        else
+            put_node(sb, doc, index, options, 0, false)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// serialize is `out` with a whole document appended.
 //
 // ```novo
 // use htmlparse
@@ -72,63 +237,143 @@ pub fn pretty_options() -> HtmlWriteOptions []
 // fn main() [io]
 //     let doc = htmlparse.parse_fragment("<p>hi", "div")
 //     let out = htmlwrite.serialize([], doc, htmlwrite.default_options())
-//     println(str.from_int(list.len(out)))   // <p>hi</p> — the parser closed it
+//     println("${list.len(out)} bytes")   // 9 bytes, <p>hi</p>
 // ```
 pub fn serialize(out: [u8], doc: htmltree.HtmlDoc, options: HtmlWriteOptions) -> [u8] []
-    todo("html-nv.htmlwrite.serialize")
+    list.concat(out, wire(written(doc, 0, options, false)))
 
-// serialize_node appends one node and everything under it.
+// serialize_node is `out` with one node and everything under it
+// appended.
 //
-// What a caller that selected a fragment out of a page wants, and what
-// makes "extract this table and put it in an email" one call.
+// ```novo
+// use htmlparse
+// use htmlwrite
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<div><p>a</p></div>")
+//     println("${list.len(htmlwrite.serialize_node([], doc, 2, htmlwrite.default_options()))}")   // 8
+// ```
 pub fn serialize_node(out: [u8], doc: htmltree.HtmlDoc, index: Int,
                       options: HtmlWriteOptions) -> [u8] []
-    todo("html-nv.htmlwrite.serialize_node")
+    list.concat(out, wire(written(doc, index, options, false)))
 
-// serialize_children appends a node's children but not the node.
+// serialize_children is `out` with a node's children appended, and not
+// the node: what the DOM calls `innerHTML`.
 //
-// The `innerHTML` question, and separate from `serialize_node` because
-// the two differ by exactly the element a caller usually does not
-// want.
+// ```novo
+// use htmlparse
+// use htmlwrite
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<div><p>a</p></div>")
+//     println("${list.len(htmlwrite.serialize_children([], doc, 1, htmlwrite.default_options()))}")   // 8
+// ```
 pub fn serialize_children(out: [u8], doc: htmltree.HtmlDoc, index: Int,
                           options: HtmlWriteOptions) -> [u8] []
-    todo("html-nv.htmlwrite.serialize_children")
+    list.concat(out, wire(written(doc, index, options, true)))
 
-// serialize_str is `serialize` into a fresh string.
+// serialize_str is a whole document written to a string.
 //
-// The convenience for a caller with no buffer to reuse.  It
-// allocates, which is the whole difference.
+// ```novo
+// use htmlparse
+// use htmlwrite
+//
+// fn main() [io]
+//     let doc = htmlparse.parse_fragment("<P CLASS=x>a<br>b", "div")
+//     println(htmlwrite.serialize_str(doc, htmlwrite.default_options()))   // <p class="x">a<br>b</p>
+// ```
 pub fn serialize_str(doc: htmltree.HtmlDoc, options: HtmlWriteOptions) -> Str []
-    todo("html-nv.htmlwrite.serialize_str")
+    written(doc, 0, options, false)
 
-// write_start_tag appends an element's opening tag, attributes
-// escaped.
-//
-// Public because a caller building a page around this package's output
-// — a template engine, a site generator — needs to emit tags too, and
-// a second implementation of attribute escaping is a second place to
-// get it wrong.
-pub fn write_start_tag(out: [u8], tag: Str, attrs: [HtmlWriteAttr],
-                       options: HtmlWriteOptions) -> [u8] []
-    todo("html-nv.htmlwrite.write_start_tag")
+// A name with the bytes that could end a tag or an attribute left out:
+// whitespace, `/`, `>`, `<`, `=`, quotes and control characters.
+fn clean_name(name: Str) -> Str
+    let sb = str.builder_new_cap(str.len(name))
+    for i in 0..str.len(name)
+        let b = str.byte_at_or(name, i, 0)
+        let bad = b <= ' ' or b == '/' or b == '>' or b == '<' or b == '=' or b == '"' or b == '\'' or b == 0x7F
+        if not bad
+            str.builder_append_char(sb, b)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
 
-// write_end_tag appends an element's closing tag, or nothing for a
-// void element.
-pub fn write_end_tag(out: [u8], tag: Str) -> [u8] []
-    todo("html-nv.htmlwrite.write_end_tag")
-
-// HtmlWriteAttr is a name and a value for a caller building a tag.
-//
-// Strings rather than the tree's ranges, because a caller writing a
-// tag has strings and has no document for a range to point into.
+// HtmlWriteAttr is a name and a value, for a caller writing a tag.
 pub struct HtmlWriteAttr
     name: Str
     value: Str
 
-// write_text appends text with the element-content escapes applied.
+// write_start_tag is `out` with an element's start tag appended, its
+// attribute values escaped.
 //
-// The same escape `htmlsafe.escape_text` does, here so that a caller
-// already holding a write buffer does not have to reach into the other
-// module for it.
+// The tag and attribute names are written without any byte that could
+// end the tag, so a name taken from input cannot open another element.
+// With `xhtml` set, a void element's tag ends in ` />`.
+//
+// ```novo
+// use htmlwrite
+//
+// fn main() [io]
+//     let out = htmlwrite.write_start_tag([], "a", [HtmlWriteAttr { name: "href", value: "/a\"b" }], htmlwrite.default_options())
+//     println("${list.len(out)} bytes")   // 20 bytes, <a href="/a&quot;b">
+// ```
+pub fn write_start_tag(out: [u8], tag: Str, attrs: [HtmlWriteAttr],
+                       options: HtmlWriteOptions) -> [u8] []
+    let sb = str.builder_new()
+    let name = clean_name(tag)
+    let _ = str.builder_append(sb, "<" + name)
+    for a in attrs
+        let _ = str.builder_append(sb, " " + clean_name(a.name) + "=\"")
+        put_attr(sb, a.value)
+        str.builder_append_char(sb, '"')
+    if options.xhtml and htmltree.childless(lowered(name))
+        let _ = str.builder_append(sb, " />")
+    else
+        str.builder_append_char(sb, '>')
+    let s = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    list.concat(out, wire(s))
+
+// A string with ASCII upper case lowered.
+fn lowered(s: Str) -> Str
+    let sb = str.builder_new_cap(str.len(s))
+    for i in 0..str.len(s)
+        let b = str.byte_at_or(s, i, 0)
+        if b >= 'A' and b <= 'Z'
+            str.builder_append_char(sb, b + 32)
+        else
+            str.builder_append_char(sb, b)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// write_end_tag is `out` with an element's end tag appended, or `out`
+// as it was for a void element, which has none.
+//
+// ```novo
+// use htmlwrite
+//
+// fn main() [io]
+//     println("${list.len(htmlwrite.write_end_tag([], "br"))}")   // 0
+// ```
+pub fn write_end_tag(out: [u8], tag: Str) -> [u8] []
+    let name = clean_name(tag)
+    if htmltree.childless(lowered(name))
+        return out[:]
+    list.concat(out, wire("</" + name + ">"))
+
+// write_text is `out` with text appended, its `&`, `<` and `>`
+// escaped.
+//
+// ```novo
+// use htmlwrite
+//
+// fn main() [io]
+//     println("${list.len(htmlwrite.write_text([], "a<b"))}")   // 6
+// ```
 pub fn write_text(out: [u8], text: Str) -> [u8] []
-    todo("html-nv.htmlwrite.write_text")
+    let sb = str.builder_new()
+    put_text(sb, text)
+    let s = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    list.concat(out, wire(s))

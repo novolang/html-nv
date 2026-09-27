@@ -1,191 +1,766 @@
-// htmlquery.nv — finding nodes: by tag, by attribute, and by a named
-// subset of CSS.
+// htmlquery.nv — finding nodes: by tag, by attribute, and by a subset
+// of CSS selectors.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// `by_tag`, `by_id`, `by_class`, `by_attr` and `by_attr_value` compare
+// and parse nothing.  A selector is compiled once by `compile` and then
+// matched against any number of nodes.
+//
+// The selector subset (Selectors Level 3):
+//
+//     *  div  #id  .class                simple selectors
+//     [a] [a=v] [a~=v] [a^=v] [a$=v] [a*=v] [a|=v]
+//     a b   a > b   a + b   a ~ b        the combinators
+//     a, b                               a group
+//     :first-child :last-child :only-child :empty :root
+//
+// Anything else is refused with an `HtmlSelectorError` and the byte it
+// was found at, rather than compiled into a selector that matches
+// nothing: `:nth-child()` and the other functional pseudo-classes,
+// `:not()`, `:has()`, `:is()` and `:where()`, pseudo-elements such as
+// `::before`, state pseudo-classes such as `:hover`, and namespaces.
+//
+// A type selector and an attribute name match ASCII
+// case-insensitively; an attribute value matches exactly.  `:root` is
+// an element whose parent is the document node.
 
+use std.str
 use htmltree
 
-// TWO SURFACES, AND THE SMALL ONE IS NOT A CONVENIENCE.  `by_tag`,
-// `by_id`, `by_class` and `by_attr` are what almost every caller
-// actually wants, they cost no parsing, and they cannot be
-// misspelled into something that silently matches nothing — which a
-// selector string can.  A caller that reaches for a selector for
-// `div` has chosen a parser over a comparison.
-//
-// THE SELECTOR SUBSET IS NAMED, COMPILED, AND ITS REFUSALS ARE
-// ERRORS.  A selector is parsed once into an `HtmlSelector` and then
-// matched many times, so a loop over a thousand nodes parses nothing.
-// What is in:
-//
-//   *                       the universal selector
-//   div                     a type selector
-//   #id  .class             id and class
-//   [attr]                  presence
-//   [attr=v] [attr~=v]      exact, and whitespace-separated-word
-//   [attr^=v] [attr$=v]     prefix and suffix
-//   [attr*=v] [attr|=v]     substring, and the hyphen-prefix form
-//   a b                     descendant
-//   a > b                   child
-//   a + b   a ~ b           adjacent and general sibling
-//   a, b                    a group
-//   :first-child :last-child :only-child :empty :root
-//
-// And what is refused, as a named `HtmlSelectorError` rather than a
-// selector that matches nothing:
-//
-//   :nth-child() and its family   they need a counting pass, and the
-//                                 an+b micro-syntax is its own parser
-//   :not() :has() :is() :where()  they nest a selector list inside a
-//                                 selector, which is a different
-//                                 matcher
-//   ::before ::after              pseudo-ELEMENTS describe things
-//                                 that are not in the document at all
-//   :hover :focus :checked        state a document does not have
-//   namespaces — `svg|rect`       this parser lowercases every name
-//
-// A refusal is an error because the alternative is worse: a selector
-// engine that accepted `:nth-child(2n)` and matched nothing would
-// leave a caller debugging their document instead of their selector.
-
 // HtmlSelector is a compiled selector.
-//
-// Opaque: it is a compiled form, and publishing its shape would make
-// every future addition to the subset a breaking change.
 pub struct HtmlSelector
-    // The selector as written, kept for a diagnostic and so that a
-    // caller can print what it compiled.
+    // The selector as written.
     source: Str
-    // The compiled program.  Its encoding is this package's business
-    // and may change within a minor version.
+    // The compiled form: one group after another, each a list of
+    // compounds joined by combinators, each compound a list of tests.
+    // Names and values are byte ranges into `source`.  The encoding may
+    // change between releases.
     program: [Int]
 
 // HtmlSelectorError is why a selector would not compile.
 pub struct HtmlSelectorError
-    // The byte offset in the selector string, so a caller can point at
-    // it.
+    // The byte offset in the selector.
     at: Int
     kind: HtmlSelectorErrorKind
 
-// HtmlSelectorErrorKind names what was wrong.
+// HtmlSelectorErrorKind is what was wrong.
 pub enum HtmlSelectorErrorKind
-    // A character that cannot appear here.
+    // A byte that cannot appear where it is.  `ch` is its value, or -1
+    // for the end of the selector.
     SelectorUnexpected(ch: Int)
-    // A `[` with no `]`, a `(` with no `)`, a quote with no close.
+    // A `[`, a `(` or a quote that is never closed.  `opener` is the byte
+    // that opened it.
     SelectorUnclosed(opener: Int)
-    // A pseudo-class or pseudo-element that is not in the subset, with
-    // its name.  The refusal a caller most often meets, and the reason
-    // it names what it saw.
+    // A pseudo-class, a pseudo-element or a namespace outside the
+    // subset, with its name.
     SelectorUnsupported(name: Str)
-    // An attribute operator that is not one of the seven.
+    // An attribute operator other than the seven, as written.
     SelectorBadOperator(op: Str)
-    // Nothing at all, or a group with an empty member — `"a,,b"`.
+    // An empty selector, or an empty member of a group, as in `a,,b`.
     SelectorEmpty
 
-// What went wrong, in words, for a caller that logs rather than
-// branches.
+// HtmlSelectorError is an `Error`.
 //
-// `Result<_, HtmlSelectorError>` requires it: SPEC § 3.4 admits a
-// `Result` error type only if it implements `Error`, so this impl is
-// what lets `compile` name its own refusal instead of returning
-// `Result<_, Str>`.
+// ```novo
+// use htmlquery
+//
+// fn main() [io]
+//     match htmlquery.compile("li:nth-child(2n)")
+//         Ok(_)  => println("compiled")
+//         Err(e) => println(e.message())   // byte 2: :nth-child is not supported
+// ```
 impl Error for HtmlSelectorError
+    // One line: the byte offset and what was wrong.
     fn message(self) -> Str
-        todo("html-nv.htmlquery.HtmlSelectorError.message")
+        match self.kind
+            SelectorUnexpected(ch)    =>
+                if ch < 0
+                    return "byte ${self.at}: the selector ends too soon"
+                "byte ${self.at}: unexpected " + str.from_byte(ch)
+            SelectorUnclosed(opener)  => "byte ${self.at}: " + str.from_byte(opener) + " is not closed"
+            SelectorUnsupported(name) => "byte ${self.at}: " + name_shown(name) + " is not supported"
+            SelectorBadOperator(op)   => "byte ${self.at}: " + op + " is not an attribute operator"
+            SelectorEmpty             => "byte ${self.at}: an empty selector"
 
-// compile parses a selector once, so that matching it many times
-// parses nothing.
+// How an unsupported name is shown: a pseudo-class with its colon.
+fn name_shown(name: Str) -> Str
+    if name == "|"
+        return "a namespace"
+    ":" + name
+
+// The operation codes of a compiled selector.
+const OP_END_GROUP = 0
+const OP_END_COMPOUND = 1
+const OP_TYPE = 2
+const OP_ID = 3
+const OP_CLASS = 4
+const OP_ATTR = 5
+const OP_PSEUDO = 6
+// The combinators, which follow `OP_END_COMPOUND` when another compound
+// comes after.
+const COMB_DESCENDANT = 10
+const COMB_CHILD = 11
+const COMB_ADJACENT = 12
+const COMB_SIBLING = 13
+
+// The attribute operators, in the order `[a]`, `=`, `~=`, `^=`, `$=`,
+// `*=`, `|=`.
+const ATTR_PRESENT = 0
+const ATTR_EQUAL = 1
+const ATTR_WORD = 2
+const ATTR_PREFIX = 3
+const ATTR_SUFFIX = 4
+const ATTR_CONTAINS = 5
+const ATTR_DASH = 6
+
+// The structural pseudo-classes.
+const PSEUDO_FIRST = 0
+const PSEUDO_LAST = 1
+const PSEUDO_ONLY = 2
+const PSEUDO_EMPTY = 3
+const PSEUDO_ROOT = 4
+
+// A compile in progress: the position and the program so far.
+struct HtmlSelCompile
+    var at: Int
+    var program: [Int]
+
+// A failed compile.
+fn fail(at: Int, kind: HtmlSelectorErrorKind) -> Result<Unit, HtmlSelectorError>
+    Err(HtmlSelectorError { at: at, kind: kind })
+
+// The byte at `i`, or -1 past the end.
+fn byte(s: Str, i: Int) -> Int
+    str.byte_at_or(s, i, -1)
+
+// Whether a byte may be part of a CSS identifier in this subset.
+fn ident_byte(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or b == '-' or b == '_' or b >= 0x80
+
+// Whether a byte is whitespace in a selector.
+fn space(b: Int) -> Bool
+    b == ' ' or b == '\t' or b == '\n' or b == 12 or b == '\r'
+
+// The end of the identifier at `i`.
+fn ident_end(s: Str, i: Int) -> Int
+    var j = i
+    while ident_byte(byte(s, j))
+        j = j + 1
+    j
+
+// Skips whitespace.
+fn skip_space(var c: HtmlSelCompile, s: Str)
+    while space(byte(s, c.at))
+        c.at = c.at + 1
+
+// Appends operation codes.
+fn emit(var c: HtmlSelCompile, codes: [Int])
+    c.program = list.concat(c.program, codes)
+
+// compile parses a selector once, so that matching it parses nothing.
 //
 // ```novo
 // use htmlquery
 //
 // fn main() [io]
 //     match htmlquery.compile("main > .row a[href^=\"/\"]")
-//         Err(e) =>
-//             println("bad selector at " + str.from_int(e.at))
-//         Ok(_)  =>
-//             println("compiled")
+//         Err(e) => println(e.message())
+//         Ok(s)  => println(htmlquery.selector_text(s))   // main > .row a[href^="/"]
 // ```
 pub fn compile(selector: Str) -> Result<HtmlSelector, HtmlSelectorError> []
-    todo("html-nv.htmlquery.compile")
+    var c = HtmlSelCompile { at: 0, program: [] }
+    let n = str.len(selector)
+    var more = true
+    while more
+        skip_space(c, selector)
+        group(c, selector)!
+        skip_space(c, selector)
+        if c.at == n
+            more = false
+        else
+            c.at = c.at + 1
+    Ok(HtmlSelector { source: selector, program: c.program })
+
+// One member of a group: compounds joined by combinators, up to a comma
+// or the end.
+fn group(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
+    let n = str.len(s)
+    if c.at == n or byte(s, c.at) == ','
+        return fail(c.at, SelectorEmpty)
+    loop
+        compound(c, s)!
+        emit(c, [OP_END_COMPOUND])
+        let before = c.at
+        skip_space(c, s)
+        let b = byte(s, c.at)
+        if c.at == n or b == ','
+            emit(c, [OP_END_GROUP])
+            return Ok(())
+        if b == '>' or b == '+' or b == '~'
+            c.at = c.at + 1
+            skip_space(c, s)
+            if b == '>'
+                emit(c, [COMB_CHILD])
+            else if b == '+'
+                emit(c, [COMB_ADJACENT])
+            else
+                emit(c, [COMB_SIBLING])
+        else if c.at > before
+            emit(c, [COMB_DESCENDANT])
+        else
+            return fail(c.at, SelectorUnexpected(b))
+
+// One compound: an optional type selector and any number of `#id`,
+// `.class`, `[attr]` and `:pseudo` tests.
+fn compound(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
+    let start = c.at
+    let b0 = byte(s, c.at)
+    if b0 == '*'
+        c.at = c.at + 1
+    else if ident_byte(b0)
+        let e = ident_end(s, c.at)
+        emit(c, [OP_TYPE, c.at, e - c.at])
+        c.at = e
+    if byte(s, c.at) == '|'
+        return fail(c.at, SelectorUnsupported("|"))
+    loop
+        let b = byte(s, c.at)
+        if b == '#' or b == '.'
+            let e = ident_end(s, c.at + 1)
+            if e == c.at + 1
+                return fail(c.at + 1, SelectorUnexpected(byte(s, c.at + 1)))
+            if b == '#'
+                emit(c, [OP_ID, c.at + 1, e - c.at - 1])
+            else
+                emit(c, [OP_CLASS, c.at + 1, e - c.at - 1])
+            c.at = e
+        else if b == '['
+            attribute(c, s)!
+        else if b == ':'
+            pseudo(c, s)!
+        else
+            if c.at == start
+                return fail(c.at, SelectorUnexpected(b))
+            return Ok(())
+
+// An attribute test, `[` to `]`.
+fn attribute(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
+    let open = c.at
+    c.at = c.at + 1
+    skip_space(c, s)
+    let name_lo = c.at
+    let name_hi = ident_end(s, c.at)
+    if name_hi == name_lo
+        if byte(s, c.at) == -1
+            return fail(open, SelectorUnclosed('['))
+        return fail(c.at, SelectorUnexpected(byte(s, c.at)))
+    c.at = name_hi
+    if byte(s, c.at) == '|' and byte(s, c.at + 1) != '='
+        return fail(c.at, SelectorUnsupported("|"))
+    skip_space(c, s)
+    let b = byte(s, c.at)
+    if b == ']'
+        c.at = c.at + 1
+        emit(c, [OP_ATTR, ATTR_PRESENT, name_lo, name_hi - name_lo, 0, 0])
+        return Ok(())
+    if b == -1
+        return fail(open, SelectorUnclosed('['))
+    var op = -1
+    if b == '='
+        op = ATTR_EQUAL
+        c.at = c.at + 1
+    else
+        let second = byte(s, c.at + 1)
+        if second == '='
+            if b == '~'
+                op = ATTR_WORD
+            else if b == '^'
+                op = ATTR_PREFIX
+            else if b == '$'
+                op = ATTR_SUFFIX
+            else if b == '*'
+                op = ATTR_CONTAINS
+            else if b == '|'
+                op = ATTR_DASH
+        if op < 0
+            var e = c.at
+            while byte(s, e) != -1 and byte(s, e) != '"' and byte(s, e) != '\'' and byte(s, e) != ']' and not ident_byte(byte(s, e)) and not space(byte(s, e))
+                e = e + 1
+            if e == c.at
+                return fail(c.at, SelectorUnexpected(b))
+            return fail(c.at, SelectorBadOperator(str.slice(s, c.at, e)))
+        c.at = c.at + 2
+    skip_space(c, s)
+    let q = byte(s, c.at)
+    var value_lo = c.at
+    var value_hi = c.at
+    if q == '"' or q == '\''
+        var e = c.at + 1
+        while byte(s, e) != -1 and byte(s, e) != q
+            if byte(s, e) == '\\'
+                return fail(e, SelectorUnexpected('\\'))
+            e = e + 1
+        if byte(s, e) == -1
+            return fail(c.at, SelectorUnclosed(q))
+        value_lo = c.at + 1
+        value_hi = e
+        c.at = e + 1
+    else
+        value_hi = ident_end(s, c.at)
+        if value_hi == value_lo
+            if q == -1
+                return fail(open, SelectorUnclosed('['))
+            return fail(c.at, SelectorUnexpected(q))
+        c.at = value_hi
+    skip_space(c, s)
+    let close = byte(s, c.at)
+    if close != ']'
+        if close == -1
+            return fail(open, SelectorUnclosed('['))
+        return fail(c.at, SelectorUnexpected(close))
+    c.at = c.at + 1
+    emit(c, [OP_ATTR, op, name_lo, name_hi - name_lo, value_lo, value_hi - value_lo])
+    Ok(())
+
+// A pseudo-class test, or the refusal of anything outside the subset.
+fn pseudo(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
+    let colon = c.at
+    if byte(s, c.at + 1) == ':'
+        let e = ident_end(s, c.at + 2)
+        return fail(colon, SelectorUnsupported(":" + str.slice(s, c.at + 2, e)))
+    let e = ident_end(s, c.at + 1)
+    if e == c.at + 1
+        return fail(c.at + 1, SelectorUnexpected(byte(s, c.at + 1)))
+    let name = lowered(str.slice(s, c.at + 1, e))
+    if byte(s, e) == '('
+        return fail(colon, SelectorUnsupported(name))
+    var code = -1
+    if name == "first-child"
+        code = PSEUDO_FIRST
+    else if name == "last-child"
+        code = PSEUDO_LAST
+    else if name == "only-child"
+        code = PSEUDO_ONLY
+    else if name == "empty"
+        code = PSEUDO_EMPTY
+    else if name == "root"
+        code = PSEUDO_ROOT
+    if code < 0
+        return fail(colon, SelectorUnsupported(name))
+    emit(c, [OP_PSEUDO, code])
+    c.at = e
+    Ok(())
+
+// A string with ASCII upper case lowered.
+fn lowered(s: Str) -> Str
+    let sb = str.builder_new_cap(str.len(s))
+    for i in 0..str.len(s)
+        let b = str.byte_at_or(s, i, 0)
+        if b >= 'A' and b <= 'Z'
+            str.builder_append_char(sb, b + 32)
+        else
+            str.builder_append_char(sb, b)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
 
 // selector_text is the selector as it was written.
-pub fn selector_text(s: HtmlSelector) -> Str []
-    todo("html-nv.htmlquery.selector_text")
-
-// error_text is a one-line description of a compile failure.
-pub fn error_text(selector: Str, e: HtmlSelectorError) -> Str []
-    todo("html-nv.htmlquery.error_text")
-
-// matches answers whether one node matches a compiled selector.
 //
-// Matching is from the node upwards — the combinators are checked by
-// walking parents and siblings — which is why a selector can be
-// matched against a single node without the tree being walked from the
-// root.
+// ```novo
+// use htmlquery
+//
+// fn main() [io]
+//     match htmlquery.compile("main > .row")
+//         Ok(s)  => println(htmlquery.selector_text(s))   // main > .row
+//         Err(e) => println(e.message())
+// ```
+pub fn selector_text(s: HtmlSelector) -> Str []
+    s.source
+
+// error_text is a compile failure as two lines: the message, then the
+// selector with a caret under the byte it names.
+//
+// ```novo
+// use htmlquery
+//
+// fn main() [io]
+//     match htmlquery.compile("a[href")
+//         Ok(_)  => println("compiled")
+//         Err(e) => println(htmlquery.error_text("a[href", e))
+// ```
+pub fn error_text(selector: Str, e: HtmlSelectorError) -> Str []
+    e.message() + "\n  " + selector + "\n  " + str.repeat(" ", e.at) + "^"
+
+// ---------------------------------------------------------------------
+// Matching.  A compound is matched against a node, and a combinator
+// walks from that node to its parent or an earlier sibling, so a node
+// is matched from itself upwards.
+
+// Whether a node is an element.
+fn is_element(doc: htmltree.HtmlDoc, i: Int) -> Bool
+    match doc.nodes[i].kind
+        HtmlElement(_, _) => true
+        _                 => false
+
+// The element sibling before a node, or `NO_NODE`.
+fn previous_element(doc: htmltree.HtmlDoc, i: Int) -> Int
+    var k = doc.nodes[i].previous_sibling
+    while k != NO_NODE and not is_element(doc, k)
+        k = doc.nodes[k].previous_sibling
+    k
+
+// The element sibling after a node, or `NO_NODE`.
+fn next_element(doc: htmltree.HtmlDoc, i: Int) -> Int
+    var k = doc.nodes[i].next_sibling
+    while k != NO_NODE and not is_element(doc, k)
+        k = doc.nodes[k].next_sibling
+    k
+
+// Whether bytes of the selector equal a string, ASCII
+// case-insensitively when `fold` is set.
+fn source_eq(sel: Str, lo: Int, len: Int, text: Str, fold: Bool) -> Bool
+    if len != str.len(text)
+        return false
+    for k in 0..len
+        var a = str.byte_at_or(sel, lo + k, 0)
+        var b = str.byte_at_or(text, k, 0)
+        if fold
+            a = lower_byte(a)
+            b = lower_byte(b)
+        if a != b
+            return false
+    true
+
+// A byte with ASCII upper case lowered.
+fn lower_byte(b: Int) -> Int
+    if b >= 'A' and b <= 'Z'
+        return b + 32
+    b
+
+// Whether an attribute value passes an operator.
+fn attr_test(op: Int, value: Str, want: Str) -> Bool
+    if op == ATTR_EQUAL
+        return value == want
+    if op == ATTR_WORD
+        return list.contains(htmltree.words(value), want)
+    if op == ATTR_DASH
+        return value == want or str.starts_with(value, want + "-")
+    if str.len(want) == 0
+        return false
+    if op == ATTR_PREFIX
+        return str.starts_with(value, want)
+    if op == ATTR_SUFFIX
+        return str.ends_with(value, want)
+    str.contains(value, want)
+
+// Whether a node passes one test, the one whose code is at `k`.
+fn test_at(doc: htmltree.HtmlDoc, i: Int, s: HtmlSelector, k: Int) -> Bool
+    let p = s.program
+    let op = p[k]
+    if op == OP_TYPE
+        return source_eq(s.source, p[k + 1], p[k + 2], htmltree.tag_name(doc, i), true)
+    if op == OP_ID
+        return source_eq(s.source, p[k + 1], p[k + 2], htmltree.attr(doc, i, "id") ?? "", false) and htmltree.has_attr(doc, i, "id")
+    if op == OP_CLASS
+        let want = str.slice(s.source, p[k + 1], p[k + 1] + p[k + 2])
+        return list.contains(htmltree.classes(doc, i), want)
+    if op == OP_ATTR
+        let name = str.slice(s.source, p[k + 2], p[k + 2] + p[k + 3])
+        match htmltree.attr(doc, i, name)
+            None        =>
+                return false
+            Some(value) =>
+                if p[k + 1] == ATTR_PRESENT
+                    return true
+                return attr_test(p[k + 1], value, str.slice(s.source, p[k + 4], p[k + 4] + p[k + 5]))
+    pseudo_test(doc, i, p[k + 1])
+
+// Whether a node passes a structural pseudo-class.
+fn pseudo_test(doc: htmltree.HtmlDoc, i: Int, code: Int) -> Bool
+    if code == PSEUDO_FIRST
+        return previous_element(doc, i) == NO_NODE
+    if code == PSEUDO_LAST
+        return next_element(doc, i) == NO_NODE
+    if code == PSEUDO_ONLY
+        return previous_element(doc, i) == NO_NODE and next_element(doc, i) == NO_NODE
+    if code == PSEUDO_ROOT
+        return doc.nodes[i].parent == 0
+    var c = doc.nodes[i].first_child
+    while c != NO_NODE
+        match doc.nodes[c].kind
+            HtmlComment(_) => ()
+            _              =>
+                return false
+        c = doc.nodes[c].next_sibling
+    true
+
+// How many program slots a test takes.
+fn width(op: Int) -> Int
+    if op == OP_ATTR
+        return 6
+    if op == OP_PSEUDO
+        return 2
+    3
+
+// Whether an element passes the compound whose tests run from `lo` to
+// `hi` in the program.
+fn compound_matches(doc: htmltree.HtmlDoc, i: Int, s: HtmlSelector, lo: Int, hi: Int) -> Bool
+    if not is_element(doc, i)
+        return false
+    var k = lo
+    while k != hi
+        if not test_at(doc, i, s, k)
+            return false
+        k = k + width(s.program[k])
+    true
+
+// The start of every compound of a group, and after each compound but
+// the last, its combinator: `[start0, comb0, start1, comb1, …, startN]`.
+// `ends` holds the matching end of each compound.
+struct HtmlSelGroup
+    starts: [Int]
+    ends: [Int]
+    combs: [Int]
+
+// The groups of a program.
+fn groups(s: HtmlSelector) -> [HtmlSelGroup]
+    let p = s.program
+    var out: [HtmlSelGroup] = []
+    var starts: [Int] = []
+    var ends: [Int] = []
+    var combs: [Int] = []
+    var k = 0
+    var start = 0
+    while k != list.len(p)
+        let op = p[k]
+        if op == OP_END_COMPOUND
+            starts = list.push(starts, start)
+            ends = list.push(ends, k)
+            k = k + 1
+            if p[k] != OP_END_GROUP
+                combs = list.push(combs, p[k])
+                k = k + 1
+            start = k
+        else if op == OP_END_GROUP
+            out = list.push(out, HtmlSelGroup { starts: starts, ends: ends, combs: combs })
+            starts = []
+            ends = []
+            combs = []
+            k = k + 1
+            start = k
+        else
+            k = k + width(op)
+    out
+
+// Whether node `i` matches compound `c` of a group and, through the
+// combinators before it, the compounds to its left.
+fn chain_matches(doc: htmltree.HtmlDoc, i: Int, s: HtmlSelector, g: HtmlSelGroup, c: Int) -> Bool
+    if not compound_matches(doc, i, s, g.starts[c], g.ends[c])
+        return false
+    if c == 0
+        return true
+    let comb = g.combs[c - 1]
+    if comb == COMB_CHILD
+        let parent = doc.nodes[i].parent
+        return parent > 0 and chain_matches(doc, parent, s, g, c - 1)
+    if comb == COMB_DESCENDANT
+        var up = doc.nodes[i].parent
+        while up > 0
+            if chain_matches(doc, up, s, g, c - 1)
+                return true
+            up = doc.nodes[up].parent
+        return false
+    if comb == COMB_ADJACENT
+        let prev = previous_element(doc, i)
+        return prev != NO_NODE and chain_matches(doc, prev, s, g, c - 1)
+    var prev = previous_element(doc, i)
+    while prev != NO_NODE
+        if chain_matches(doc, prev, s, g, c - 1)
+            return true
+        prev = previous_element(doc, prev)
+    false
+
+// matches says whether a node matches a compiled selector.
+//
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<ul><li class=a>x</li></ul>")
+//     match htmlquery.compile("ul > li.a")
+//         Ok(s)  => println("${htmlquery.matches(doc, 2, s)}")   // true
+//         Err(e) => println(e.message())
+// ```
 pub fn matches(doc: htmltree.HtmlDoc, index: Int, s: HtmlSelector) -> Bool []
-    todo("html-nv.htmlquery.matches")
+    if index <= 0 or index >= list.len(doc.nodes)
+        return false
+    for g in groups(s)
+        if chain_matches(doc, index, s, g, list.len(g.starts) - 1)
+            return true
+    false
+
+// The nodes under `from`, in document order, `from` left out.
+fn descendants(doc: htmltree.HtmlDoc, from: Int) -> [Int]
+    var out: [Int] = []
+    if from < 0 or from >= list.len(doc.nodes)
+        return out
+    var stack = list.rev(htmltree.children(doc, from))
+    while list.len(stack) > 0
+        let i = stack[list.len(stack) - 1]
+        stack = stack[:list.len(stack) - 1]
+        out = list.push(out, i)
+        stack = list.concat(stack, list.rev(htmltree.children(doc, i)))
+    out
 
 // select is the first node under `from` that matches, in document
-// order.
+// order, or `NO_NODE`.
 //
-// `NO_NODE` when nothing does.
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p>a</p><p class=x>b</p>")
+//     match htmlquery.compile(".x")
+//         Ok(s)  => println("${htmlquery.select(doc, 0, s)}")   // 3
+//         Err(e) => println(e.message())
+// ```
 pub fn select(doc: htmltree.HtmlDoc, from: Int, s: HtmlSelector) -> Int []
-    todo("html-nv.htmlquery.select")
+    for i in descendants(doc, from)
+        if matches(doc, i, s)
+            return i
+    NO_NODE
 
 // select_all is every node under `from` that matches, in document
 // order.
+//
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p>a</p><div><p>b</p></div>")
+//     match htmlquery.compile("p")
+//         Ok(s)  => println("${list.len(htmlquery.select_all(doc, 0, s))}")   // 2
+//         Err(e) => println(e.message())
+// ```
 pub fn select_all(doc: htmltree.HtmlDoc, from: Int, s: HtmlSelector) -> [Int] []
-    todo("html-nv.htmlquery.select_all")
+    list.filter(descendants(doc, from), i => matches(doc, i, s))
 
-// by_tag is every descendant element with a tag name, in document
-// order.
+// by_tag is every element under `from` with a tag name, compared ASCII
+// case-insensitively, in document order.
 //
-// The comparison, not the parser.  Costs no compile and cannot be
-// misspelled into something that matches the wrong thing.
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     println("${list.len(htmlquery.by_tag(htmlparse.parse("<ul><li>a<li>b</ul>"), 0, "LI"))}")   // 2
+// ```
 pub fn by_tag(doc: htmltree.HtmlDoc, from: Int, tag: Str) -> [Int] []
-    todo("html-nv.htmlquery.by_tag")
+    let want = lowered(tag)
+    list.filter(descendants(doc, from), i => is_element(doc, i) and htmltree.tag_name(doc, i) == want)
 
-// by_id is the first descendant with an `id` attribute equal to `id`.
+// by_id is the first element under `from` whose `id` is `id`, or
+// `NO_NODE`.
 //
-// The FIRST, because a document with two of them is a broken document
-// and returning a list would invite a caller to pretend otherwise.
-// `HtmlIssueKind.IssueDuplicateId` is where the parser already said
-// so.
+// A document with two elements of one `id` is reported by the parser
+// as `IssueDuplicateId`, and this answers the first.
+//
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     println("${htmlquery.by_id(htmlparse.parse("<p id=a>x</p>"), 0, "a")}")   // 1
+// ```
 pub fn by_id(doc: htmltree.HtmlDoc, from: Int, id: Str) -> Int []
-    todo("html-nv.htmlquery.by_id")
+    for i in descendants(doc, from)
+        match htmltree.attr(doc, i, "id")
+            Some(v) =>
+                if v == id
+                    return i
+            None    => ()
+    NO_NODE
 
-// by_class is every descendant whose `class` attribute holds a class,
-// as a whitespace-separated word.
+// by_class is every element under `from` whose `class` holds a class
+// as a whole word, in document order.  `navbar` does not match
+// `class="navbar-brand"`.
 //
-// A word and not a substring: `navbar` does not match
-// `class="navbar-brand"`, which is the bug a `str.contains` on the
-// attribute always has.
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p class='navbar-brand'>a</p><p class='x navbar'>b</p>")
+//     println("${list.len(htmlquery.by_class(doc, 0, "navbar"))}")   // 1
+// ```
 pub fn by_class(doc: htmltree.HtmlDoc, from: Int, class: Str) -> [Int] []
-    todo("html-nv.htmlquery.by_class")
+    list.filter(descendants(doc, from), i => list.contains(htmltree.classes(doc, i), class))
 
-// by_attr is every descendant that has an attribute, whatever its
-// value.
+// by_attr is every element under `from` that has an attribute, with any
+// value, in document order.
+//
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     println("${list.len(htmlquery.by_attr(htmlparse.parse("<input disabled><input>"), 0, "disabled"))}")   // 1
+// ```
 pub fn by_attr(doc: htmltree.HtmlDoc, from: Int, name: Str) -> [Int] []
-    todo("html-nv.htmlquery.by_attr")
+    list.filter(descendants(doc, from), i => htmltree.has_attr(doc, i, name))
 
-// by_attr_value is every descendant whose attribute equals a value
-// exactly.
+// by_attr_value is every element under `from` whose attribute equals a
+// value exactly, in document order.
+//
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     println("${list.len(htmlquery.by_attr_value(htmlparse.parse("<a rel=me>x</a>"), 0, "rel", "me"))}")   // 1
+// ```
 pub fn by_attr_value(doc: htmltree.HtmlDoc, from: Int, name: Str, value: Str) -> [Int] []
-    todo("html-nv.htmlquery.by_attr_value")
+    list.filter(descendants(doc, from), i => htmltree.attr(doc, i, name) == Some(value))
 
-// closest is the nearest ancestor of `index` that matches, itself
-// included.
+// closest is the nearest of `index` and its ancestors that matches, or
+// `NO_NODE`.
 //
-// The question a scraper asks after it has found a piece of text:
-// which row was that in.  `NO_NODE` when no ancestor matches.
+// ```novo
+// use htmlparse
+// use htmlquery
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<ul><li><b>x</b></li></ul>")
+//     match htmlquery.compile("li")
+//         Ok(s)  => println("${htmlquery.closest(doc, 3, s)}")   // 2
+//         Err(e) => println(e.message())
+// ```
 pub fn closest(doc: htmltree.HtmlDoc, index: Int, s: HtmlSelector) -> Int []
-    todo("html-nv.htmlquery.closest")
+    var i = index
+    while i > 0 and i < list.len(doc.nodes)
+        if matches(doc, i, s)
+            return i
+        i = doc.nodes[i].parent
+    NO_NODE
 
-// walk visits every node under `from` in document order and returns
-// the ones `keep` chose.
+// walk is every node under `from`, in document order, whose kind `keep`
+// accepts.
 //
-// The generic traversal the six functions above are shortcuts for, so
-// that a caller with a question none of them answers does not have to
-// write the walk.
+// ```novo
+// use htmlparse
+// use htmlquery
+// use htmltree
+//
+// fn is_comment(k: HtmlKind) -> Bool
+//     match k
+//         HtmlComment(_) => true
+//         _              => false
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p>a</p><!-- c --><p>b</p>")
+//     println("${list.len(htmlquery.walk(doc, 0, is_comment))}")   // 1
+// ```
 pub fn walk(doc: htmltree.HtmlDoc, from: Int, keep: fn(htmltree.HtmlKind) -> Bool) -> [Int] []
-    todo("html-nv.htmlquery.walk")
+    list.filter(descendants(doc, from), i => keep(doc.nodes[i].kind))

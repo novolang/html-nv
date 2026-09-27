@@ -1,78 +1,56 @@
-// htmlparse.nv — HTML5 text into a tolerant tree, and the tokenizer
+// htmlparse.nv — HTML text into a tolerant tree, and the tokenizer
 // underneath it.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// Parsing HTML is two stages (WHATWG HTML section 13.2).  The tokenizer
+// turns text into tokens: a doctype, a start tag, an end tag, a
+// comment, a run of characters, and the end of the file.  Tree
+// construction turns tokens into a tree, closing what the document
+// left open and inserting what it left implied.
+//
+// The tokenizer is the whole of section 13.2.5: the data, RCDATA,
+// RAWTEXT, script data and PLAINTEXT states, the script data escape
+// states, the attribute states, the comment states with their
+// `--!>` and `<!-->` cases, the doctype states, bogus comments, and
+// character references, which `htmlentity` decodes when a caller asks
+// for the text.  The tokens it produces are the ones html5lib-tests
+// expects.
+//
+// Tree construction is a named subset of section 13.2.6:
+//
+// - void elements never have children;
+// - `script`, `style`, `textarea`, `title` and the other raw-text
+//   elements hold their contents as text;
+// - an open `p`, `li`, `dd`, `dt`, `option`, `td`, `th`, `tr`,
+//   `thead`, `tbody` or `tfoot` closes when an element that cannot be
+//   inside it opens;
+// - an end tag that matches an open element closes everything opened
+//   after it, and an end tag that matches none is dropped;
+// - `</p>` with no open `p` is an empty `p`, and `</br>` is a `br`;
+// - a line feed right after `<pre>`, `<textarea>` or `<listing>` is
+//   dropped;
+// - a fragment is parsed in the context of the element it will live in.
+//
+// The tree holds what the document wrote: the `html`, `head` and
+// `body` elements a browser adds are not added.  Four constructs are
+// not implemented, and each raises `IssueUnsupportedConstruct` where it
+// appears: misnested formatting, which the adoption agency algorithm
+// repairs; content inside a table but outside a cell, which foster
+// parenting moves; a `template`'s contents as a separate fragment; and
+// `svg` and `math` foreign content.  What the parser does instead is
+// plain: the content stays where it was written.
+//
+// There is no error type.  The algorithm has no fatal errors, so
+// `parse` answers a document for every input, and `HtmlDoc.issues`
+// names each recovery with its position.
 
+use std.str
 use htmltree
+use htmlentity
 
-// THERE IS NO ERROR TYPE, and that is the HTML5 specification's
-// decision rather than this package's.  The parsing algorithm has no
-// fatal errors: every byte sequence is a document, and what a browser
-// does with `<p><b>a</p>b` is defined rather than undefined.  So
-// `parse` returns an `HtmlDoc` and never a `Result`, and everything
-// that was wrong with the document is in `doc.issues` — named, with a
-// position, so a linter can fail on what it chooses to.
-//
-// THE TOKENIZER IS THE WHOLE SPEC.  All of it: the eighty states, the
-// character reference machine with its 2231 named references, the
-// raw-text and RCDATA states, the script-data escape states, and the
-// bogus-comment and markup-declaration paths.  It is a state machine
-// over bytes with a small state, it is the half that the HTML5
-// tokenizer test suite checks directly, and there is no honest way to
-// implement a subset of it.
-//
-// THE TREE CONSTRUCTION IS A NAMED SUBSET, and naming it is this
-// module's main obligation to a reader.  The full algorithm is
-// twenty-three insertion modes, a stack of open elements, a list of
-// active formatting elements, foster parenting and the adoption agency
-// algorithm — and it exists to make every browser agree about
-// documents nobody meant to write.  What this package implements:
-//
-//   * the void elements, which never nest;
-//   * the raw-text elements — script, style, textarea, title — whose
-//     contents are not markup;
-//   * implied end tags: an open `<p>`, `<li>`, `<dd>`, `<dt>`,
-//     `<option>`, `<td>`, `<th>`, `<tr>`, `<thead>`, `<tbody>` or
-//     `<tfoot>` closes when something that cannot be inside it opens;
-//   * an end tag that matches an ancestor closes everything up to it;
-//   * a stray end tag is dropped and reported;
-//   * anything still open at the end of the document is closed, and
-//     reported;
-//   * the fragment case, for parsing a piece of a document.
-//
-// AND WHAT IT REFUSES, each with what happens instead — every one of
-// them raises `IssueUnsupportedConstruct` rather than being silently
-// approximated:
-//
-//   THE ADOPTION AGENCY ALGORITHM.  `<b>a<i>b</b>c</i>` is misnested
-//   formatting, and the algorithm reconstructs it so that the `<i>`
-//   reopens inside what remains.  Here the `</b>` closes the `<i>` as
-//   well, and both are reported.  A document that needs this is a
-//   document written by hand and never validated.
-//
-//   FOSTER PARENTING.  Content that appears inside a `<table>` but
-//   outside a cell is, per the spec, moved to before the table.  Here
-//   it stays where it was written, as a child of the table.
-//
-//   `<template>` CONTENTS.  The spec gives a template its own
-//   document fragment, invisible to ordinary traversal.  Here a
-//   template's children are ordinary children, which is what a
-//   sanitiser and a scraper both want and what a browser does not do.
-//
-//   FOREIGN CONTENT — SVG and MathML.  Their integration points
-//   change the tokenizer's rules mid-document.  Here an `<svg>` is an
-//   ordinary element with ordinary children, its case-sensitive
-//   attribute names lowercased like everything else.
-//
-// A reader who needs any of those four needs a browser engine, and
-// should be told so by a package's README rather than by a rendering
-// that is subtly wrong.
-
-// HtmlLimits bounds what the parser will do.
+// HtmlLimits bounds what the parser does.  When a bound is reached the
+// rest of the document is not parsed and `HtmlDoc.truncated` is set.
 pub struct HtmlLimits
-    // How deeply elements may nest.  A document past it is truncated
-    // rather than recursed into; the pathological input is a file of
-    // 100,000 `<div>`s and it is two lines to write.
+    // How deeply elements may nest.
     max_depth: Int
     // How many nodes the tree may hold.
     max_nodes: Int
@@ -80,59 +58,1292 @@ pub struct HtmlLimits
     max_attributes: Int
 
 // HtmlTokenKind is one thing the tokenizer found.
-//
-// Public, and the tokenizer with it, because the HTML5 tokenizer test
-// suite tests exactly this — a list of tokens for an input — and a
-// package that hid its tokenizer could not run the suite that proves
-// it right.  It is also what a streaming consumer wants: a scraper
-// looking for one tag does not need a tree.
 pub enum HtmlTokenKind
+    // A doctype and its name, in lower case.  Its public and system
+    // identifiers are read and not kept.
     TokenDoctype(name: htmltree.HtmlRange)
-    // A start tag, its name lowercased, its attributes, and whether it
-    // closed itself.  Self-closing is honoured on a void element and
-    // on foreign content, and REPORTED AND IGNORED on anything else,
-    // which is what the spec says and what surprises everybody.
+    // A start tag: its name in lower case, its attributes, and whether
+    // it ended in `/>`.
     TokenStartTag(name: htmltree.HtmlRange, attrs: [htmltree.HtmlAttr], self_closing: Bool)
+    // An end tag and its name in lower case.  Attributes on an end tag
+    // are read and dropped, as section 13.2.5 says.
     TokenEndTag(name: htmltree.HtmlRange)
+    // A comment's text.
     TokenComment(text: htmltree.HtmlRange)
-    // A run of character data.
+    // A run of characters, and whether it holds a character reference
+    // to decode.
     TokenCharacters(text: htmltree.HtmlRange, needs_decoding: Bool)
+    // The end of the source.  The last token.
     TokenEof
 
-// HtmlToken is a token and where it was.
+// HtmlToken is a token and the bytes it took.
 pub struct HtmlToken
     kind: HtmlTokenKind
-    // The byte range the token occupied, for a diagnostic and for a
-    // rewrite in place.
+    // The bytes of the token in the tokenizer's source.
     span: htmltree.HtmlRange
 
-// HtmlTokenizer is the tokenizer's state.
+// HtmlTokenizer is the tokenizer between two tokens.
 //
-// A value, so a caller can hold one.  The state itself is one integer
-// — the spec's state name — plus the offsets of what is being
-// accumulated; it is not the tree, and it is not large.
+// Read it through the functions below; the fields may change between
+// releases.
 pub struct HtmlTokenizer
+    // The source after preprocessing: line breaks normalised to LF and
+    // names lowered (see `htmltree`).  Every range points into it.
     source: Str
+    // The offset of the next byte to read.
     at: Int
-    // The spec's tokenizer state, as the packed integer the tables
-    // use.  Public as a field rather than an enum of eighty variants,
-    // because nothing outside the implementation should be matching on
-    // it and eighty public variants would be eighty names nobody else
-    // may use.
+    // The tokenizer state: data, RCDATA, RAWTEXT, script data or
+    // PLAINTEXT, as one of the `STATE_` values below.
     state: Int
     limits: HtmlLimits
+    // The name of the last start tag, which an end tag must match to
+    // leave the RCDATA, RAWTEXT and script data states.
+    last: Str
+    // Whether a start tag moves the tokenizer into the state its element
+    // needs, as tree construction does: RCDATA after `title`, RAWTEXT
+    // after `style`, and so on.
+    switching: Bool
+    // Whether `TokenEof` has been answered.
+    ended: Bool
 
-// HtmlTokenStep is a token and the tokenizer that follows it.
+// HtmlTokenStep is a token and the tokenizer after it.
 pub struct HtmlTokenStep
     tokenizer: HtmlTokenizer
     token: HtmlToken
 
-// default_limits are bounds no real document reaches: 512 deep, a
-// million nodes, 4096 attributes.
-pub fn default_limits() -> HtmlLimits []
-    todo("html-nv.htmlparse.default_limits")
+// The tokenizer states a run of text can be read in.
+const STATE_DATA = 0
+const STATE_RCDATA = 1
+const STATE_RAWTEXT = 2
+const STATE_SCRIPT = 3
+const STATE_PLAINTEXT = 4
 
-// parse is a whole document into a tree.
+// What one scan of the source found: a token, or nothing when the
+// bytes were skipped, and the state after it.
+struct HtmlScanned
+    kind: ?HtmlTokenKind
+    start: Int
+    end: Int
+    state: Int
+    last: Str
+
+// default_limits is 512 levels of nesting, a million nodes and 4096
+// attributes on one element.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     println("${htmlparse.default_limits().max_depth}")   // 512
+// ```
+pub fn default_limits() -> HtmlLimits []
+    HtmlLimits { max_depth: 512, max_nodes: 1000000, max_attributes: 4096 }
+
+// ---------------------------------------------------------------------
+// Bytes.
+
+// The byte at `i`, or -1 past the end.
+fn at_byte(src: Str, i: Int) -> Int
+    str.byte_at_or(src, i, -1)
+
+// Whether a byte is an ASCII letter.
+fn is_alpha(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z'
+
+// Whether a byte is whitespace inside a tag: tab, line feed, form feed
+// or space.  A carriage return is a line feed by the time it is read.
+fn is_ws(b: Int) -> Bool
+    b == '\t' or b == '\n' or b == 12 or b == ' ' or b == '\r'
+
+// A byte with ASCII upper case lowered.
+fn lower(b: Int) -> Int
+    if b >= 'A' and b <= 'Z'
+        return b + 32
+    b
+
+// A string with ASCII upper case lowered.
+fn lowered(s: Str) -> Str
+    let sb = str.builder_new_cap(str.len(s))
+    for i in 0..str.len(s)
+        str.builder_append_char(sb, lower(str.byte_at_or(s, i, 0)))
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// Whether the bytes at `at` spell `word`, ignoring ASCII case.
+fn spells(src: Str, at: Int, word: Str) -> Bool
+    for k in 0..str.len(word)
+        if lower(at_byte(src, at + k)) != str.byte_at_or(word, k, 0)
+            return false
+    true
+
+// The index of the first `>` at or after `from`, or -1.
+fn find_gt(src: Str, from: Int) -> Int
+    for i in from..str.len(src)
+        if str.byte_at_or(src, i, 0) == '>'
+            return i
+    -1
+
+// Whether any byte in `lo` to `hi` is `&`.
+fn has_amp(src: Str, lo: Int, hi: Int) -> Bool
+    for i in lo..hi
+        if str.byte_at_or(src, i, 0) == '&'
+            return true
+    false
+
+// A range.
+fn span(lo: Int, hi: Int) -> htmltree.HtmlRange
+    HtmlRange { start: lo, end: hi }
+
+// ---------------------------------------------------------------------
+// Scans.  Each reads one token from `at`, following the states of
+// section 13.2.5, and answers where it ended and the state after it.
+
+// A found token.
+fn found(kind: HtmlTokenKind, lo: Int, hi: Int, state: Int, last: Str) -> HtmlScanned
+    HtmlScanned { kind: Some(kind), start: lo, end: hi, state: state, last: last }
+
+// Bytes read and no token: a `</>`, or a tag cut off by the end of the
+// source.
+fn skipped(hi: Int, state: Int, last: Str) -> HtmlScanned
+    HtmlScanned { kind: None, start: hi, end: hi, state: state, last: last }
+
+// A run of characters, which decodes references in the data and RCDATA
+// states only.
+fn characters(src: Str, lo: Int, hi: Int, state: Int, last: Str) -> HtmlScanned
+    let refs = (state == STATE_DATA or state == STATE_RCDATA) and has_amp(src, lo, hi)
+    found(TokenCharacters(span(lo, hi), refs), lo, hi, state, last)
+
+// Reads one token from the tokenizer's position.
+fn scan(t: HtmlTokenizer) -> HtmlScanned
+    let src = t.source
+    let n = str.len(src)
+    if t.at >= n
+        return found(TokenEof, n, n, t.state, t.last)
+    if t.state == STATE_PLAINTEXT
+        return characters(src, t.at, n, t.state, t.last)
+    if t.state == STATE_RCDATA or t.state == STATE_RAWTEXT
+        return raw_text(t)
+    if t.state == STATE_SCRIPT
+        return script_data(t)
+    data(t)
+
+// The data state (section 13.2.5.1) and tag open (13.2.5.6).
+fn data(t: HtmlTokenizer) -> HtmlScanned
+    let src = t.source
+    let at = t.at
+    if at_byte(src, at) == '<'
+        let b1 = at_byte(src, at + 1)
+        if b1 == '!'
+            return markup_declaration(t, at)
+        if b1 == '/'
+            let b2 = at_byte(src, at + 2)
+            if is_alpha(b2)
+                return tag(t, at, at + 2, true)
+            if b2 == '>'
+                return skipped(at + 3, t.state, t.last)
+            if b2 == -1
+                return characters(src, at, at + 2, t.state, t.last)
+            return bogus_comment(t, at, at + 2)
+        if is_alpha(b1)
+            return tag(t, at, at + 1, false)
+        if b1 == '?'
+            return bogus_comment(t, at, at + 1)
+        return characters(src, at, run_end(src, at + 1), t.state, t.last)
+    characters(src, at, run_end(src, at), t.state, t.last)
+
+// Where a run of characters in the data state ends: at a `<` that
+// begins a tag, a comment or a doctype, or at the end.
+fn run_end(src: Str, from: Int) -> Int
+    let n = str.len(src)
+    for i in from..n
+        if str.byte_at_or(src, i, 0) == '<'
+            let b = at_byte(src, i + 1)
+            if b == '!' or b == '/' or b == '?' or is_alpha(b)
+                return i
+    n
+
+// The markup declaration open state (section 13.2.5.42): a comment, a
+// doctype, or a bogus comment.  `<![CDATA[` is a bogus comment outside
+// foreign content, which this package does not have.
+fn markup_declaration(t: HtmlTokenizer, at: Int) -> HtmlScanned
+    let src = t.source
+    if at_byte(src, at + 2) == '-' and at_byte(src, at + 3) == '-'
+        return comment(t, at, at + 4)
+    if spells(src, at + 2, "doctype")
+        return doctype(t, at, at + 9)
+    bogus_comment(t, at, at + 2)
+
+// The bogus comment state (section 13.2.5.41): everything up to the
+// next `>` is the comment.
+fn bogus_comment(t: HtmlTokenizer, at: Int, from: Int) -> HtmlScanned
+    let gt = find_gt(t.source, from)
+    if gt < 0
+        let n = str.len(t.source)
+        return found(TokenComment(span(from, n)), at, n, t.state, t.last)
+    found(TokenComment(span(from, gt)), at, gt + 1, t.state, t.last)
+
+// The comment states of sections 13.2.5.43 to 13.2.5.52.  The comment's
+// text runs from `from` to `mark`, the start of the dashes that end it.
+fn comment(t: HtmlTokenizer, at: Int, from: Int) -> HtmlScanned
+    let src = t.source
+    let n = str.len(src)
+    let b0 = at_byte(src, from)
+    if b0 == '>'
+        return found(TokenComment(span(from, from)), at, from + 1, t.state, t.last)
+    var mode = 0
+    var mark = from
+    var i = from
+    if b0 == '-'
+        let b1 = at_byte(src, from + 1)
+        if b1 == '>'
+            return found(TokenComment(span(from, from)), at, from + 2, t.state, t.last)
+        if b1 == -1
+            return found(TokenComment(span(from, from)), at, n, t.state, t.last)
+        if b1 == '-'
+            mode = 2
+            i = from + 2
+    // mode 0: comment; 1: comment end dash; 2: comment end; 3: comment
+    // end bang.
+    while i != n
+        let b = str.byte_at_or(src, i, 0)
+        if mode == 0
+            if b == '-'
+                mark = i
+                mode = 1
+        else if mode == 1
+            if b == '-'
+                mode = 2
+            else
+                mode = 0
+        else if mode == 2
+            if b == '>'
+                return found(TokenComment(span(from, mark)), at, i + 1, t.state, t.last)
+            if b == '!'
+                mode = 3
+            else if b == '-'
+                mark = mark + 1
+            else
+                mode = 0
+        else
+            if b == '-'
+                mark = i
+                mode = 1
+            else if b == '>'
+                return found(TokenComment(span(from, mark)), at, i + 1, t.state, t.last)
+            else
+                mode = 0
+        i = i + 1
+    if mode == 0
+        mark = n
+    found(TokenComment(span(from, mark)), at, n, t.state, t.last)
+
+// The doctype states (sections 13.2.5.53 to 13.2.5.68).  The name runs
+// to whitespace or `>`, and the identifiers after it are read up to the
+// `>` that ends the doctype, which also ends a quoted identifier.
+fn doctype(t: HtmlTokenizer, at: Int, from: Int) -> HtmlScanned
+    let src = t.source
+    let n = str.len(src)
+    var i = from
+    while i != n and is_ws(str.byte_at_or(src, i, 0))
+        i = i + 1
+    if i == n
+        return found(TokenDoctype(span(i, i)), at, n, t.state, t.last)
+    if str.byte_at_or(src, i, 0) == '>'
+        return found(TokenDoctype(span(i, i)), at, i + 1, t.state, t.last)
+    var j = i
+    while j != n and not is_ws(str.byte_at_or(src, j, 0)) and str.byte_at_or(src, j, 0) != '>'
+        j = j + 1
+    let gt = find_gt(src, j)
+    if gt < 0
+        return found(TokenDoctype(span(i, j)), at, n, t.state, t.last)
+    found(TokenDoctype(span(i, j)), at, gt + 1, t.state, t.last)
+
+// The state a start tag leaves the tokenizer in, when the tokenizer
+// switches states as tree construction would (section 13.2.6.4.7).
+fn state_after(name: Str) -> Int
+    match name
+        "title"     => STATE_RCDATA
+        "textarea"  => STATE_RCDATA
+        "style"     => STATE_RAWTEXT
+        "xmp"       => STATE_RAWTEXT
+        "iframe"    => STATE_RAWTEXT
+        "noembed"   => STATE_RAWTEXT
+        "noframes"  => STATE_RAWTEXT
+        "script"    => STATE_SCRIPT
+        "plaintext" => STATE_PLAINTEXT
+        _           => STATE_DATA
+
+// A tag from `at`, whose name starts at `name_at`: the tag name state
+// and the attribute states (sections 13.2.5.8 and 13.2.5.32 to
+// 13.2.5.40).  A tag cut off by the end of the source is dropped.
+fn tag(t: HtmlTokenizer, at: Int, name_at: Int, is_end: Bool) -> HtmlScanned
+    let src = t.source
+    let n = str.len(src)
+    var i = name_at
+    while i != n and not is_ws(str.byte_at_or(src, i, 0)) and str.byte_at_or(src, i, 0) != '/' and str.byte_at_or(src, i, 0) != '>'
+        i = i + 1
+    let name = span(name_at, i)
+    var attrs: [htmltree.HtmlAttr] = []
+    var self_closing = false
+    var done = false
+    while not done
+        // Before attribute name.
+        while i != n and is_ws(str.byte_at_or(src, i, 0))
+            i = i + 1
+        if i == n
+            return skipped(n, t.state, t.last)
+        let b = str.byte_at_or(src, i, 0)
+        if b == '>'
+            i = i + 1
+            done = true
+        else if b == '/'
+            let c = at_byte(src, i + 1)
+            if c == -1
+                return skipped(n, t.state, t.last)
+            if c == '>'
+                self_closing = true
+                i = i + 2
+                done = true
+            else
+                i = i + 1
+        else
+            // Attribute name: a first `=` is part of it.
+            let name_lo = i
+            i = i + 1
+            while i != n and not is_ws(str.byte_at_or(src, i, 0)) and str.byte_at_or(src, i, 0) != '/' and str.byte_at_or(src, i, 0) != '>' and str.byte_at_or(src, i, 0) != '='
+                i = i + 1
+            let name_hi = i
+            // After attribute name.
+            while i != n and is_ws(str.byte_at_or(src, i, 0))
+                i = i + 1
+            if i == n
+                return skipped(n, t.state, t.last)
+            if str.byte_at_or(src, i, 0) != '='
+                attrs = list.push(attrs,
+                    HtmlAttr { name: span(name_lo, name_hi), value: span(i, i), needs_decoding: false })
+            else
+                i = i + 1
+                // Before attribute value.
+                while i != n and is_ws(str.byte_at_or(src, i, 0))
+                    i = i + 1
+                if i == n
+                    return skipped(n, t.state, t.last)
+                let q = str.byte_at_or(src, i, 0)
+                if q == '"' or q == '\''
+                    var e = i + 1
+                    while e != n and str.byte_at_or(src, e, 0) != q
+                        e = e + 1
+                    if e == n
+                        return skipped(n, t.state, t.last)
+                    attrs = list.push(attrs, HtmlAttr { name: span(name_lo, name_hi),
+                        value: span(i + 1, e),
+                        needs_decoding: has_amp(src, i + 1, e) })
+                    i = e + 1
+                else if q == '>'
+                    attrs = list.push(attrs, HtmlAttr { name: span(name_lo, name_hi),
+                        value: span(i, i),
+                        needs_decoding: false })
+                else
+                    var e = i
+                    while e != n and not is_ws(str.byte_at_or(src, e, 0)) and str.byte_at_or(src, e, 0) != '>'
+                        e = e + 1
+                    if e == n
+                        return skipped(n, t.state, t.last)
+                    attrs = list.push(attrs, HtmlAttr { name: span(name_lo, name_hi),
+                        value: span(i, e),
+                        needs_decoding: has_amp(src, i, e) })
+                    i = e
+    if is_end
+        return found(TokenEndTag(name), at, i, STATE_DATA, t.last)
+    let tag_name = lowered(str.slice(src, name.start, name.end))
+    var next = t.state
+    if t.switching
+        next = state_after(tag_name)
+    found(TokenStartTag(name, attrs, self_closing), at, i, next, tag_name)
+
+// Whether an end tag for the last start tag begins at `i`: `</`, the
+// name in any case, and whitespace, `/` or `>` after it.
+fn appropriate_end(src: Str, i: Int, last: Str) -> Bool
+    if str.len(last) == 0 or at_byte(src, i) != '<' or at_byte(src, i + 1) != '/'
+        return false
+    if not spells(src, i + 2, last)
+        return false
+    let after = at_byte(src, i + 2 + str.len(last))
+    is_ws(after) or after == '/' or after == '>'
+
+// The RCDATA and RAWTEXT states (sections 13.2.5.2, 13.2.5.3 and 13.2.5.9
+// to 13.2.5.14): text up to the end tag of the element that opened them.
+fn raw_text(t: HtmlTokenizer) -> HtmlScanned
+    let src = t.source
+    let n = str.len(src)
+    if appropriate_end(src, t.at, t.last)
+        return tag(t, t.at, t.at + 2, true)
+    for i in t.at..n
+        if appropriate_end(src, i, t.last)
+            return characters(src, t.at, i, t.state, t.last)
+    characters(src, t.at, n, t.state, t.last)
+
+// The script data states (sections 13.2.5.4 and 13.2.5.15 to
+// 13.2.5.31): text up to `</script`, except inside an escaped
+// `<!-- <script> ... </script> -->` block.
+fn script_data(t: HtmlTokenizer) -> HtmlScanned
+    let src = t.source
+    if appropriate_end(src, t.at, t.last)
+        return tag(t, t.at, t.at + 2, true)
+    characters(src, t.at, script_end(src, t.at, t.last), t.state, t.last)
+
+// The length of a run of ASCII letters at `i`.
+fn letters(src: Str, i: Int) -> Int
+    var k = i
+    while is_alpha(at_byte(src, k))
+        k = k + 1
+    k - i
+
+// Where the script data from `from` ends: at the end tag, or the end of
+// the source.  `mode` is 0 for script data, 1 for escaped, 2 for
+// double escaped; `dashes` counts the dashes just read in the escaped
+// modes.
+fn script_end(src: Str, from: Int, last: Str) -> Int
+    let n = str.len(src)
+    var mode = 0
+    var dashes = 0
+    var i = from
+    while i != n
+        let b = str.byte_at_or(src, i, 0)
+        if b == '<'
+            if mode != 2 and appropriate_end(src, i, last)
+                return i
+            if mode == 0 and at_byte(src, i + 1) == '!' and at_byte(src, i + 2) == '-' and at_byte(src, i + 3) == '-'
+                mode = 1
+                dashes = 2
+                i = i + 4
+                continue
+            if mode == 1 and is_alpha(at_byte(src, i + 1))
+                let len = letters(src, i + 1)
+                let after = at_byte(src, i + 1 + len)
+                if len == 6 and spells(src, i + 1, "script") and (is_ws(after) or after == '/' or after == '>')
+                    mode = 2
+                i = i + 1 + len
+                dashes = 0
+                continue
+            if mode == 2 and at_byte(src, i + 1) == '/' and is_alpha(at_byte(src, i + 2))
+                let len = letters(src, i + 2)
+                let after = at_byte(src, i + 2 + len)
+                if len == 6 and spells(src, i + 2, "script") and (is_ws(after) or after == '/' or after == '>')
+                    mode = 1
+                i = i + 2 + len
+                dashes = 0
+                continue
+            dashes = 0
+        else if b == '-'
+            dashes = dashes + 1
+        else if b == '>'
+            if mode != 0 and dashes >= 2
+                mode = 0
+            dashes = 0
+        else
+            dashes = 0
+        i = i + 1
+    n
+
+// ---------------------------------------------------------------------
+// The tokenizer.
+
+// Whether a scan found the end of the source.
+fn is_eof(kind: ?HtmlTokenKind) -> Bool
+    match kind
+        Some(TokenEof) => true
+        _              => false
+
+// A tokenizer over preprocessed text.
+fn raw_tokenizer(text: Str, state: Int, last: Str, switching: Bool) -> HtmlTokenizer
+    HtmlTokenizer { source: text,
+        at: 0,
+        state: state,
+        limits: default_limits(),
+        last: last,
+        switching: switching,
+        ended: false }
+
+// A string with CR LF and CR written as LF (section 13.2.3.5).
+fn newlines_normalised(source: Str) -> Str
+    let n = str.len(source)
+    let sb = str.builder_new_cap(n)
+    for i in 0..n
+        let b = str.byte_at_or(source, i, 0)
+        if b == '\r'
+            if at_byte(source, i + 1) != '\n'
+                str.builder_append_char(sb, '\n')
+        else
+            str.builder_append_char(sb, b)
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// The ranges of every tag, attribute and doctype name in a token.
+fn name_ranges(kind: HtmlTokenKind) -> [htmltree.HtmlRange]
+    match kind
+        TokenStartTag(name, attrs, _) => list.concat([name], list.map(attrs, a => a.name))
+        TokenEndTag(name)             => [name]
+        TokenDoctype(name)            => [name]
+        _                             => []
+
+// The preprocessed source a tokenizer reads: line breaks normalised,
+// and every tag, attribute and doctype name lowered.  The names are
+// found by tokenizing once; lowering them moves no byte.
+fn preprocessed(source: Str, state: Int, last: Str, switching: Bool) -> Str
+    let text = newlines_normalised(source)
+    var t = raw_tokenizer(text, state, last, switching)
+    var names: [htmltree.HtmlRange] = []
+    var more = true
+    while more
+        let s = scan(t)
+        if is_eof(s.kind)
+            more = false
+        else
+            match s.kind
+                Some(kind) =>
+                    names = list.concat(names, name_ranges(kind))
+                None       => ()
+        t = HtmlTokenizer { source: text,
+            at: s.end,
+            state: s.state,
+            limits: t.limits,
+            last: s.last,
+            switching: switching,
+            ended: false }
+    if list.len(names) == 0
+        return text
+    let sb = str.builder_new_cap(str.len(text))
+    var at = 0
+    for r in names
+        for i in at..r.start
+            str.builder_append_char(sb, str.byte_at_or(text, i, 0))
+        for i in r.start..r.end
+            str.builder_append_char(sb, lower(str.byte_at_or(text, i, 0)))
+        at = r.end
+    for i in at..str.len(text)
+        str.builder_append_char(sb, str.byte_at_or(text, i, 0))
+    let out = str.builder_to_str(sb)
+    str.builder_drop(sb)
+    out
+
+// A tokenizer in a given state, as html5lib-tests sets one up: the
+// state, the last start tag, and whether start tags switch states.
+fn tokenizer_state(source: Str, state: Int, last: Str, switching: Bool) -> HtmlTokenizer
+    raw_tokenizer(preprocessed(source, state, last, switching), state, last, switching)
+
+// The state a context element starts the tokenizer in (section
+// 13.4, step 4 of the fragment parsing algorithm).
+fn context_state(context: Str) -> Int
+    let c = lowered(context)
+    if c == "noscript"
+        return STATE_DATA
+    state_after(c)
+
+// tokenizer starts a token walk over a source string, in the data
+// state.
+//
+// Making a tokenizer reads the source once, to normalise its line
+// breaks and lower its names; `next_token` then reads one token at a
+// time.  A start tag of a raw-text element moves the walk into the
+// state that element needs, so the text of a `script` comes back as
+// characters.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     var t = htmlparse.tokenizer("<p>hi</p>")
+//     var n = 0
+//     var more = true
+//     while more
+//         match htmlparse.next_token(t)
+//             Some(step) =>
+//                 n = n + 1
+//                 t = step.tokenizer
+//             None => more = false
+//     println("${n} tokens")   // 4 tokens
+// ```
+pub fn tokenizer(source: Str) -> HtmlTokenizer []
+    tokenizer_state(source, STATE_DATA, "", true)
+
+// tokenizer_in starts a walk in the state a context element implies:
+// RCDATA inside `title` and `textarea`, RAWTEXT inside `style`, `xmp`,
+// `iframe`, `noembed` and `noframes`, script data inside `script`,
+// PLAINTEXT inside `plaintext`, and data anywhere else.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     let t = htmlparse.tokenizer_in("<b>x</b>", "title")
+//     match htmlparse.next_token(t)
+//         Some(step) =>
+//             match step.token.kind
+//                 TokenCharacters(_, _) => println("text")   // text
+//                 _                     => println("markup")
+//         None => println("nothing")
+// ```
+pub fn tokenizer_in(source: Str, context: Str) -> HtmlTokenizer []
+    tokenizer_state(source, context_state(context), lowered(context), true)
+
+// next_token is the next token and the tokenizer after it, or `None`
+// after `TokenEof`.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     match htmlparse.next_token(htmlparse.tokenizer("<br/>"))
+//         Some(step) =>
+//             match step.token.kind
+//                 TokenStartTag(_, _, closing) => println("${closing}")   // true
+//                 _                            => println("another token")
+//         None => println("nothing")
+// ```
+pub fn next_token(t: HtmlTokenizer) -> ?HtmlTokenStep []
+    if t.ended
+        return None
+    var cur = t
+    loop
+        let s = scan(cur)
+        let ended = is_eof(s.kind)
+        let after = HtmlTokenizer { source: cur.source,
+            at: s.end,
+            state: s.state,
+            limits: cur.limits,
+            last: s.last,
+            switching: cur.switching,
+            ended: ended }
+        match s.kind
+            Some(kind) =>
+                return Some(HtmlTokenStep { tokenizer: after,
+                    token: HtmlToken { kind: kind, span: span(s.start, s.end) } })
+            None       =>
+                cur = after
+
+// token_text is the text of a range of the tokenizer's source.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     let t = htmlparse.tokenizer("<DIV>")
+//     println(htmlparse.token_text(t, HtmlRange { start: 1, end: 4 }))   // div
+// ```
+pub fn token_text(t: HtmlTokenizer, r: htmltree.HtmlRange) -> Str []
+    str.slice(t.source, r.start, r.end)
+
+// ---------------------------------------------------------------------
+// Tree construction.
+
+// The tree while it is built: the links of every node as parallel
+// lists, the stack of open elements, and what was reported.
+struct HtmlBuild
+    var source: Str
+    var kinds: [htmltree.HtmlKind]
+    var parents: [Int]
+    var firsts: [Int]
+    var lasts: [Int]
+    var nexts: [Int]
+    var prevs: [Int]
+    var starts: [Int]
+    var ends: [Int]
+    // The open elements, outermost first, their tag names and the
+    // ranges of those names.
+    var stack: [Int]
+    var tags: [Str]
+    var tag_ranges: [htmltree.HtmlRange]
+    var issues: [htmltree.HtmlIssue]
+    var ids: [Str]
+    var truncated: Bool
+    var limits: HtmlLimits
+    // The fragment's context element, or an empty string for a document.
+    var context: Str
+    // Whether a line feed at the start of the next text is dropped.
+    var skip_lf: Bool
+    // Whether anything but a comment, a doctype or whitespace has been
+    // added.
+    var begun: Bool
+    // Whether a doctype has been added.
+    var doctyped: Bool
+
+// Whether a tag is one of `h1` to `h6`.
+fn is_heading(tag: Str) -> Bool
+    tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4" or tag == "h5" or tag == "h6"
+
+// Whether a start tag closes an open `p` in button scope (section
+// 13.2.6.4.7, "A start tag whose tag name is one of: address, …").
+fn closes_p(tag: Str) -> Bool
+    if is_heading(tag)
+        return true
+    match tag
+        "address"    => true
+        "article"    => true
+        "aside"      => true
+        "blockquote" => true
+        "center"     => true
+        "details"    => true
+        "dialog"     => true
+        "dir"        => true
+        "div"        => true
+        "dl"         => true
+        "fieldset"   => true
+        "figcaption" => true
+        "figure"     => true
+        "footer"     => true
+        "header"     => true
+        "hgroup"     => true
+        "main"       => true
+        "menu"       => true
+        "nav"        => true
+        "ol"         => true
+        "p"          => true
+        "search"     => true
+        "section"    => true
+        "summary"    => true
+        "ul"         => true
+        "pre"        => true
+        "listing"    => true
+        "form"       => true
+        "plaintext"  => true
+        "table"      => true
+        "hr"         => true
+        "xmp"        => true
+        _            => false
+
+// Whether a tag is in HTML's special category (section 13.2.4.2).
+fn is_special(tag: Str) -> Bool
+    if is_heading(tag) or closes_p(tag)
+        return true
+    match tag
+        "applet"   => true
+        "area"     => true
+        "base"     => true
+        "basefont" => true
+        "bgsound"  => true
+        "body"     => true
+        "br"       => true
+        "button"   => true
+        "caption"  => true
+        "col"      => true
+        "colgroup" => true
+        "dd"       => true
+        "dt"       => true
+        "embed"    => true
+        "frame"    => true
+        "frameset" => true
+        "head"     => true
+        "html"     => true
+        "iframe"   => true
+        "img"      => true
+        "input"    => true
+        "keygen"   => true
+        "li"       => true
+        "link"     => true
+        "marquee"  => true
+        "meta"     => true
+        "noembed"  => true
+        "noframes" => true
+        "noscript" => true
+        "object"   => true
+        "param"    => true
+        "script"   => true
+        "select"   => true
+        "source"   => true
+        "style"    => true
+        "tbody"    => true
+        "td"       => true
+        "template" => true
+        "textarea" => true
+        "tfoot"    => true
+        "th"       => true
+        "thead"    => true
+        "title"    => true
+        "tr"       => true
+        "track"    => true
+        "wbr"      => true
+        _          => false
+
+// Whether an element's end tag may be left out, so that closing it
+// implicitly is not reported (section 13.2.6.3 and the end of 13.2.6.4.7).
+fn end_optional(tag: Str) -> Bool
+    match tag
+        "dd"       => true
+        "dt"       => true
+        "li"       => true
+        "optgroup" => true
+        "option"   => true
+        "p"        => true
+        "rb"       => true
+        "rp"       => true
+        "rt"       => true
+        "rtc"      => true
+        "tbody"    => true
+        "td"       => true
+        "tfoot"    => true
+        "th"       => true
+        "thead"    => true
+        "tr"       => true
+        "body"     => true
+        "html"     => true
+        "head"     => true
+        "colgroup" => true
+        _          => false
+
+// Whether an element is closed by "generate implied end tags" (section
+// 13.2.6.3).
+fn implied_end(tag: Str) -> Bool
+    match tag
+        "dd"       => true
+        "dt"       => true
+        "li"       => true
+        "optgroup" => true
+        "option"   => true
+        "p"        => true
+        "rb"       => true
+        "rp"       => true
+        "rt"       => true
+        "rtc"      => true
+        _          => false
+
+// Whether a tag is a formatting element, the ones the adoption agency
+// algorithm repairs (section 13.2.4.3).
+fn is_formatting(tag: Str) -> Bool
+    match tag
+        "a"      => true
+        "b"      => true
+        "big"    => true
+        "code"   => true
+        "em"     => true
+        "font"   => true
+        "i"      => true
+        "nobr"   => true
+        "s"      => true
+        "small"  => true
+        "strike" => true
+        "strong" => true
+        "tt"     => true
+        "u"      => true
+        _        => false
+
+// Whether a node of a table's structure is where text or an element
+// would be foster-parented (section 13.2.6.1).
+fn is_table_context(tag: Str) -> Bool
+    tag == "table" or tag == "tbody" or tag == "thead" or tag == "tfoot" or tag == "tr"
+
+// Whether a start tag belongs inside a table without foster parenting.
+fn table_content(tag: Str) -> Bool
+    match tag
+        "caption"  => true
+        "colgroup" => true
+        "col"      => true
+        "tbody"    => true
+        "thead"    => true
+        "tfoot"    => true
+        "tr"       => true
+        "td"       => true
+        "th"       => true
+        "script"   => true
+        "style"    => true
+        "template" => true
+        "form"     => true
+        "input"    => true
+        _          => false
+
+// Whether an element ends a scope search (section 13.2.4.2).  `kind` is
+// 0 for the default scope, 1 for list item scope, 2 for button scope
+// and 3 for table scope.
+fn scope_boundary(tag: Str, kind: Int) -> Bool
+    if kind == 3
+        return tag == "html" or tag == "table" or tag == "template"
+    if kind == 1 and (tag == "ol" or tag == "ul")
+        return true
+    if kind == 2 and tag == "button"
+        return true
+    match tag
+        "applet"   => true
+        "caption"  => true
+        "html"     => true
+        "table"    => true
+        "td"       => true
+        "th"       => true
+        "marquee"  => true
+        "object"   => true
+        "template" => true
+        _          => false
+
+// The position in the stack of the nearest open element named `tag`
+// in a scope, or -1.
+fn in_scope(b: HtmlBuild, tag: Str, kind: Int) -> Int
+    var k = list.len(b.tags) - 1
+    while k >= 0
+        let t = b.tags[k]
+        if t == tag
+            return k
+        if scope_boundary(t, kind)
+            return -1
+        k = k - 1
+    -1
+
+// The tag of the current node: the innermost open element, or the
+// fragment's context.
+fn current_tag(b: HtmlBuild) -> Str
+    let n = list.len(b.tags)
+    if n == 0
+        return b.context
+    b.tags[n - 1]
+
+// The current node's index, or the document node.
+fn current(b: HtmlBuild) -> Int
+    let n = list.len(b.stack)
+    if n == 0
+        return 0
+    b.stack[n - 1]
+
+// Records a recovery.
+fn report(var b: HtmlBuild, at: Int, kind: htmltree.HtmlIssueKind)
+    b.issues = list.push(b.issues, HtmlIssue { at: at, kind: kind })
+
+// Appends a node under the current node, or answers -1 when the node
+// limit is reached.
+fn add(var b: HtmlBuild, kind: htmltree.HtmlKind, lo: Int, hi: Int) -> Int
+    let index = list.len(b.kinds)
+    if index >= b.limits.max_nodes
+        b.truncated = true
+        return -1
+    let parent = current(b)
+    let prev = b.lasts[parent]
+    b.kinds = list.push(b.kinds, kind)
+    b.parents = list.push(b.parents, parent)
+    b.firsts = list.push(b.firsts, NO_NODE)
+    b.lasts = list.push(b.lasts, NO_NODE)
+    b.nexts = list.push(b.nexts, NO_NODE)
+    b.prevs = list.push(b.prevs, prev)
+    b.starts = list.push(b.starts, lo)
+    b.ends = list.push(b.ends, hi)
+    if prev == NO_NODE
+        b.firsts[parent] = index
+    else
+        b.nexts[prev] = index
+    b.lasts[parent] = index
+    index
+
+// Pops the open elements down to and including position `k`, ending
+// each at `at` and the one at `k` at `close_end`.  Every popped element
+// above `k` whose end tag may not be left out is reported unclosed,
+// except a formatting element: a browser reopens that one later, which
+// is the part of tree construction this package does not implement, and
+// it is reported as such.
+fn pop_to(var b: HtmlBuild, k: Int, at: Int, close_end: Int)
+    var top = list.len(b.stack) - 1
+    while top >= k
+        let index = b.stack[top]
+        if top == k
+            b.ends[index] = close_end
+        else
+            b.ends[index] = at
+            if is_formatting(b.tags[top])
+                report(b, b.starts[index], IssueUnsupportedConstruct(b.tag_ranges[top]))
+            else if not end_optional(b.tags[top])
+                report(b, b.starts[index], IssueUnclosedElement(b.tag_ranges[top]))
+        top = top - 1
+    b.stack = b.stack[:k]
+    b.tags = b.tags[:k]
+    b.tag_ranges = b.tag_ranges[:k]
+
+// Closes the nearest open element named `tag` in a scope, if there is
+// one, as a start tag that implies its end would (section 13.2.6.4.7).
+fn close_in_scope(var b: HtmlBuild, tag: Str, kind: Int, at: Int)
+    let k = in_scope(b, tag, kind)
+    if k >= 0
+        pop_to(b, k, at, at)
+
+// The `li`, `dd` and `dt` rule: walk down the stack to the nearest
+// element named in `names`, and close it, unless a special element
+// other than `address`, `div` or `p` comes first.
+fn close_list_item(var b: HtmlBuild, names: [Str], at: Int)
+    var k = list.len(b.tags) - 1
+    while k >= 0
+        let t = b.tags[k]
+        if list.contains(names, t)
+            pop_to(b, k, at, at)
+            return
+        if is_special(t) and t != "address" and t != "div" and t != "p"
+            return
+        k = k - 1
+
+// Reports each character reference in a range that is not well-formed.
+fn check_refs(var b: HtmlBuild, lo: Int, hi: Int, in_attr: Bool)
+    for at in htmlentity.decode_scan(b.source, lo, hi, in_attr).errors
+        report(b, at, IssueBadCharacterReference(HtmlRange { start: at, end: at + 1 }))
+
+// A start tag (section 13.2.6.4.7, in the subset this package
+// implements).
+fn start_tag(var b: HtmlBuild, name: htmltree.HtmlRange, attrs: [htmltree.HtmlAttr],
+             self_closing: Bool, lo: Int, hi: Int)
+    if list.len(attrs) > b.limits.max_attributes
+        b.truncated = true
+        return
+    let tag = str.slice(b.source, name.start, name.end)
+    if tag == "template" or tag == "svg" or tag == "math"
+        report(b, lo, IssueUnsupportedConstruct(name))
+    if is_table_context(current_tag(b)) and not table_content(tag)
+        report(b, lo, IssueUnsupportedConstruct(name))
+    if tag == "a" and list.contains(b.tags, "a")
+        report(b, lo, IssueUnsupportedConstruct(name))
+    if tag == "li"
+        close_list_item(b, ["li"], lo)
+    if tag == "dd" or tag == "dt"
+        close_list_item(b, ["dd", "dt"], lo)
+    if closes_p(tag) or tag == "li" or tag == "dd" or tag == "dt"
+        close_in_scope(b, "p", 2, lo)
+    if is_heading(tag) and is_heading(current_tag(b)) and list.len(b.tags) > 0
+        pop_to(b, list.len(b.tags) - 1, lo, lo)
+    if tag == "button"
+        close_in_scope(b, "button", 0, lo)
+    if (tag == "option" or tag == "optgroup") and current_tag(b) == "option"
+        pop_to(b, list.len(b.tags) - 1, lo, lo)
+    if tag == "td" or tag == "th" or tag == "tr" or tag == "tbody" or tag == "thead" or tag == "tfoot"
+        close_in_scope(b, "td", 3, lo)
+        close_in_scope(b, "th", 3, lo)
+    if tag == "tr" or tag == "tbody" or tag == "thead" or tag == "tfoot"
+        close_in_scope(b, "tr", 3, lo)
+    if tag == "tbody" or tag == "thead" or tag == "tfoot"
+        close_in_scope(b, "tbody", 3, lo)
+        close_in_scope(b, "thead", 3, lo)
+        close_in_scope(b, "tfoot", 3, lo)
+    let childless = htmltree.childless(tag)
+    if not childless and list.len(b.stack) >= b.limits.max_depth
+        b.truncated = true
+        return
+    let index = add(b, HtmlElement(name, attrs), lo, hi)
+    if index < 0
+        return
+    b.begun = true
+    for a in attrs
+        if a.needs_decoding
+            check_refs(b, a.value.start, a.value.end, true)
+    note_id(b, attrs)
+    if childless
+        return
+    if self_closing
+        report(b, lo, IssueSelfClosingNonVoid(name))
+    b.stack = list.push(b.stack, index)
+    b.tags = list.push(b.tags, tag)
+    b.tag_ranges = list.push(b.tag_ranges, name)
+    if tag == "pre" or tag == "textarea" or tag == "listing"
+        b.skip_lf = true
+
+// Records an element's `id`, and reports it when another element has
+// it already.
+fn note_id(var b: HtmlBuild, attrs: [htmltree.HtmlAttr])
+    for a in attrs
+        if str.slice(b.source, a.name.start, a.name.end) == "id"
+            let id = htmlentity.decode_scan(b.source, a.value.start, a.value.end, true).text
+            if list.contains(b.ids, id)
+                report(b, a.value.start, IssueDuplicateId(a.value))
+            else
+                b.ids = list.push(b.ids, id)
+            return
+
+// Whether an end tag is one HTML closes by scope (the "address, …"
+// end tags of section 13.2.6.4.7, and the table's).
+fn closed_by_scope(tag: Str) -> Bool
+    if closes_p(tag) and tag != "p" and tag != "hr" and tag != "table" and tag != "xmp" and tag != "plaintext"
+        return true
+    match tag
+        "button"  => true
+        "applet"  => true
+        "marquee" => true
+        "object"  => true
+        "body"    => true
+        "html"    => true
+        "table"   => true
+        "caption" => true
+        "tbody"   => true
+        "thead"   => true
+        "tfoot"   => true
+        "tr"      => true
+        "td"      => true
+        "th"      => true
+        _         => false
+
+// The scope an end tag is looked for in.
+fn end_scope(tag: Str) -> Int
+    match tag
+        "li"    => 1
+        "p"     => 2
+        "table" => 3
+        "tbody" => 3
+        "thead" => 3
+        "tfoot" => 3
+        "tr"    => 3
+        "td"    => 3
+        "th"    => 3
+        _       => 0
+
+// An end tag (section 13.2.6.4.7, in the subset this package
+// implements).
+fn end_tag(var b: HtmlBuild, name: htmltree.HtmlRange, lo: Int, hi: Int)
+    let tag = str.slice(b.source, name.start, name.end)
+    if htmltree.childless(tag)
+        report(b, lo, IssueStrayEndTag(name))
+        if tag == "br"
+            let _ = add(b, HtmlElement(name, []), lo, hi)
+        return
+    if tag == "p" and in_scope(b, "p", 2) < 0
+        report(b, lo, IssueStrayEndTag(name))
+        let _ = add(b, HtmlElement(name, []), lo, hi)
+        return
+    if is_heading(tag)
+        var k = list.len(b.tags) - 1
+        while k >= 0 and not is_heading(b.tags[k])
+            if scope_boundary(b.tags[k], 0)
+                k = 0
+            k = k - 1
+        if k < 0
+            report(b, lo, IssueStrayEndTag(name))
+            return
+        pop_to(b, k, lo, hi)
+        return
+    if is_formatting(tag)
+        let k = last_index(b.tags, tag)
+        if k < 0
+            report(b, lo, IssueStrayEndTag(name))
+            return
+        if k != list.len(b.tags) - 1
+            report(b, lo, IssueUnsupportedConstruct(name))
+        pop_to(b, k, lo, hi)
+        return
+    if tag == "p" or tag == "li" or tag == "dd" or tag == "dt" or closed_by_scope(tag)
+        let k = in_scope(b, tag, end_scope(tag))
+        if k < 0
+            report(b, lo, IssueStrayEndTag(name))
+            return
+        pop_to(b, k, lo, hi)
+        return
+    var k = list.len(b.tags) - 1
+    while k >= 0
+        let t = b.tags[k]
+        if t == tag
+            pop_to(b, k, lo, hi)
+            return
+        if is_special(t)
+            k = 0
+        k = k - 1
+    report(b, lo, IssueStrayEndTag(name))
+
+// The last position of a string in a list, or -1.
+fn last_index(xs: [Str], x: Str) -> Int
+    var k = list.len(xs) - 1
+    while k >= 0
+        if xs[k] == x
+            return k
+        k = k - 1
+    -1
+
+// Whether a range of the source is all whitespace.
+fn blank(src: Str, lo: Int, hi: Int) -> Bool
+    for i in lo..hi
+        if not is_ws(str.byte_at_or(src, i, 0))
+            return false
+    true
+
+// A run of characters.
+//
+// A line feed right after `pre`, `textarea` or `listing` is dropped,
+// written as itself or as a reference.  In a document, whitespace
+// before the first element or text is dropped, as the initial and
+// "before html" insertion modes do (sections 13.2.6.4.1 and 13.2.6.4.2).
+fn text(var b: HtmlBuild, lo0: Int, hi: Int, refs: Bool)
+    var lo = lo0
+    if b.skip_lf
+        b.skip_lf = false
+        if at_byte(b.source, lo) == '\n'
+            lo = lo + 1
+        else if refs and at_byte(b.source, lo) == '&'
+            lo = lo + htmlentity.line_feed_ref(b.source, lo, hi)
+    if b.context == "" and not b.begun
+        while lo != hi and is_ws(str.byte_at_or(b.source, lo, 0))
+            lo = lo + 1
+    if lo == hi
+        return
+    let r = HtmlRange { start: lo, end: hi }
+    if is_table_context(current_tag(b)) and not blank(b.source, lo, hi)
+        report(b, lo, IssueUnsupportedConstruct(r))
+    if refs
+        check_refs(b, lo, hi, false)
+    if not blank(b.source, lo, hi)
+        b.begun = true
+    let _ = add(b, HtmlText(r, refs), lo, hi)
+
+// Builds the tree from a tokenizer's tokens.
+fn build(t0: HtmlTokenizer, limits: HtmlLimits, context: Str) -> htmltree.HtmlDoc
+    var b = HtmlBuild {
+        source: t0.source, kinds: [HtmlDocument], parents: [NO_NODE], firsts: [NO_NODE],
+        lasts: [NO_NODE], nexts: [NO_NODE], prevs: [NO_NODE], starts: [0],
+        ends: [str.len(t0.source)], stack: [], tags: [], tag_ranges: [], issues: [], ids: [],
+        truncated: false, limits: limits, context: context, skip_lf: false, begun: false,
+        doctyped: false }
+    var t = t0
+    var more = true
+    while more and not b.truncated
+        match next_token(t)
+            None       =>
+                more = false
+            Some(step) =>
+                t = step.tokenizer
+                let lo = step.token.span.start
+                let hi = step.token.span.end
+                if not token_is_text(step.token.kind)
+                    b.skip_lf = false
+                match step.token.kind
+                    TokenStartTag(name, attrs, closing) => start_tag(b, name, attrs, closing, lo, hi)
+                    TokenEndTag(name)                   => end_tag(b, name, lo, hi)
+                    TokenCharacters(r, refs)            => text(b, r.start, r.end, refs)
+                    TokenComment(r)                     =>
+                        let _ = add(b, HtmlComment(r), lo, hi)
+                    TokenDoctype(name)                  =>
+                        if not b.begun and not b.doctyped and context == ""
+                            let _ = add(b, HtmlDoctype(name), lo, hi)
+                            b.doctyped = true
+                    TokenEof                            => ()
+    close_all(b)
+    arena(b)
+
+// Closes every element still open at the end of the source, and
+// reports each whose end tag may not be left out.
+fn close_all(var b: HtmlBuild)
+    let n = str.len(b.source)
+    for k in 0..list.len(b.stack)
+        let index = b.stack[k]
+        b.ends[index] = n
+        if not end_optional(b.tags[k])
+            report(b, b.starts[index], IssueUnclosedElement(b.tag_ranges[k]))
+    b.stack = []
+    b.tags = []
+    b.tag_ranges = []
+
+// Whether a token is a run of characters.
+fn token_is_text(kind: HtmlTokenKind) -> Bool
+    match kind
+        TokenCharacters(_, _) => true
+        _                     => false
+
+// The document a finished build describes.
+fn arena(b: HtmlBuild) -> htmltree.HtmlDoc
+    var nodes: [htmltree.HtmlNode] = []
+    for i in 0..list.len(b.kinds)
+        nodes = list.push(nodes, HtmlNode {
+            kind: b.kinds[i], parent: b.parents[i], first_child: b.firsts[i],
+            last_child: b.lasts[i], next_sibling: b.nexts[i], previous_sibling: b.prevs[i],
+            span: HtmlRange { start: b.starts[i], end: b.ends[i] } })
+    HtmlDoc { source: b.source, nodes: nodes, issues: b.issues, truncated: b.truncated }
+
+// parse is a whole document into a tree, under `default_limits`.
 //
 // ```novo
 // use htmlparse
@@ -140,66 +1351,82 @@ pub fn default_limits() -> HtmlLimits []
 //
 // fn main() [io]
 //     let doc = htmlparse.parse("<ul><li>a<li>b</ul>")
-//     println(str.from_int(htmltree.count(doc)))
+//     println("${htmltree.count(doc)}")   // 6
 // ```
 pub fn parse(source: Str) -> htmltree.HtmlDoc []
-    todo("html-nv.htmlparse.parse")
+    parse_with(source, default_limits())
 
-// parse_with parses with limits of the caller's choosing.
+// parse_with is `parse` under the caller's limits.
+//
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     let tight = HtmlLimits { max_depth: 2, max_nodes: 100, max_attributes: 8 }
+//     println("${htmlparse.parse_with("<a><b><c>x", tight).truncated}")   // true
+// ```
 pub fn parse_with(source: Str, limits: HtmlLimits) -> htmltree.HtmlDoc []
-    todo("html-nv.htmlparse.parse_with")
+    build(tokenizer(source), limits, "")
 
-// parse_fragment parses a piece of a document as if it were inside
-// `context`.
+// parse_fragment parses text as the contents of a `context` element,
+// the fragment parsing algorithm of section 13.4.
 //
-// The case a sanitiser actually has: a comment body, a README's
-// rendered HTML, a snippet from a form — none of which is a document
-// and all of which are parsed wrongly if treated as one.  The context
-// element decides the tokenizer's starting state, which is why
-// `parse_fragment(s, "textarea")` treats the whole of `s` as text.
+// The context decides the tokenizer's first state, so inside
+// `textarea` the whole text is text, and it is where a list item or a
+// table cell closes.  The context element itself is not in the tree.
+// A doctype in a fragment is dropped.
+//
+// ```novo
+// use htmlparse
+// use htmltree
+//
+// fn main() [io]
+//     let doc = htmlparse.parse_fragment("<b>x</b>", "textarea")
+//     println(htmltree.inner_text(doc, htmltree.root(doc)))   // <b>x</b>
+// ```
 pub fn parse_fragment(source: Str, context: Str) -> htmltree.HtmlDoc []
-    todo("html-nv.htmlparse.parse_fragment")
+    let c = lowered(context)
+    build(tokenizer_in(source, c), default_limits(), c)
 
-// tokenizer starts a token walk over a source string.
+// line_of is the line, counting from 1, that a byte offset of the
+// document's source is on.
 //
-// The streaming surface, for a caller that does not want a tree: a
-// scraper looking for one tag, a checker counting elements, or the
-// HTML5 tokenizer test suite.
-pub fn tokenizer(source: Str) -> HtmlTokenizer []
-    todo("html-nv.htmlparse.tokenizer")
-
-// tokenizer_in starts a walk in the state a context element implies.
+// ```novo
+// use htmlparse
 //
-// `"script"`, `"style"`, `"textarea"` and `"title"` each start the
-// tokenizer somewhere other than the data state, and a caller
-// tokenizing a fragment out of one of them has to say so or the
-// contents come back as markup.
-pub fn tokenizer_in(source: Str, context: Str) -> HtmlTokenizer []
-    todo("html-nv.htmlparse.tokenizer_in")
-
-// next_token is the next token, or `None` after `TokenEof`.
-//
-// **The load-bearing interface of the parsing half.**  The tokenizer
-// is the part of HTML5 that is fully specified and fully testable, and
-// this is it: bytes in, tokens out, the state as a value, and no tree
-// anywhere.
-pub fn next_token(t: HtmlTokenizer) -> ?HtmlTokenStep []
-    todo("html-nv.htmlparse.next_token")
-
-// token_text is the source text a token's range names.
-pub fn token_text(t: HtmlTokenizer, r: htmltree.HtmlRange) -> Str []
-    todo("html-nv.htmlparse.token_text")
-
-// line_of is the 1-based line a byte offset falls on, for a
-// diagnostic.
+// fn main() [io]
+//     println("${htmlparse.line_of(htmlparse.parse("a\nb\nc"), 4)}")   // 3
+// ```
 pub fn line_of(doc: htmltree.HtmlDoc, offset: Int) -> Int []
-    todo("html-nv.htmlparse.line_of")
+    var line = 1
+    var end = offset
+    if end > str.len(doc.source)
+        end = str.len(doc.source)
+    for i in 0..end
+        if str.byte_at_or(doc.source, i, 0) == '\n'
+            line = line + 1
+    line
 
-// issue_text is a one-line description of a recovery, for a linter's
-// output.
+// issue_text is one line about a recovery: what, with which name, and
+// on which line.
 //
-// The issue is a value so a caller can match on it; this is here so a
-// caller that only wants to print it does not have to write the
-// twelve-arm match first.
+// ```novo
+// use htmlparse
+//
+// fn main() [io]
+//     let doc = htmlparse.parse("<p>a</b></p>")
+//     println(htmlparse.issue_text(doc, doc.issues[0]))   // line 1: </b> closes nothing and was dropped
+// ```
 pub fn issue_text(doc: htmltree.HtmlDoc, issue: htmltree.HtmlIssue) -> Str []
-    todo("html-nv.htmlparse.issue_text")
+    let line = "line ${line_of(doc, issue.at)}: "
+    match issue.kind
+        IssueStrayEndTag(tag)           => line + "</" + slice(doc, tag) + "> closes nothing and was dropped"
+        IssueUnclosedElement(tag)       => line + "<" + slice(doc, tag) + "> was not closed"
+        IssueDuplicateId(id)            => line + "the id \"" + slice(doc, id) + "\" is used twice"
+        IssueBadCharacterReference(_)   => line + "a character reference is not well-formed"
+        IssueUnsupportedConstruct(what) => line + "\"" + slice(doc, what) + "\" needs a part of HTML's tree construction this parser does not implement"
+        IssueSelfClosingNonVoid(tag)    => line + "<" + slice(doc, tag) + "/> is not a void element, so the slash is ignored"
+
+// The text of a range of a document's source.
+fn slice(doc: htmltree.HtmlDoc, r: htmltree.HtmlRange) -> Str
+    str.slice(doc.source, r.start, r.end)
