@@ -1,0 +1,61 @@
+// hostile_tests.nv — documents that nest, or that leave formatting
+// elements open, a few hundred kilobytes deep.
+
+use std.test
+use std.str
+use std.list
+use htmlparse
+use htmltree
+use htmlwrite
+use htmlquery
+use htmlsafe
+
+// Parses a document, then writes it, reads its text and sanitizes it,
+// so that every pass over a hostile tree runs; answers the parse.
+fn exercised(source: Str) -> htmltree.HtmlDoc [io]
+    let doc = htmlparse.parse(source)
+    let out = htmlwrite.serialize_str(doc, htmlwrite.default_options())
+    let text = htmltree.inner_text(doc, 0)
+    let clean = htmlsafe.sanitize(doc, htmlsafe.allow_basic())
+    test.assert(str.len(out) >= str.len(text))
+    test.assert(htmltree.count(clean) >= 1)
+    doc
+
+@test
+fn test_deep_nesting_stops_at_the_depth_limit() [io]
+    test.case("divs")
+    test.assert(exercised("<div>".repeat(200000)).truncated)
+    test.case("closed divs")
+    test.assert(exercised("<div>".repeat(100000) + "</div>".repeat(100000)).truncated)
+    test.case("formatting elements that reopen")
+    test.assert(exercised("<b><i>".repeat(50000) + "<p>x</p>").truncated)
+    test.case("tables")
+    test.assert(exercised("<table><tr><td>".repeat(30000)).truncated)
+    test.case("lists")
+    test.assert(exercised("<ul><li>".repeat(100000)).truncated)
+    test.case("a tree under the limit is not cut")
+    test.assert(not exercised("<div>".repeat(300) + "<span class=x>").truncated)
+
+@test
+fn test_quadratic_shapes_are_bounded() [io]
+    test.case("misnested formatting")
+    let misnested = exercised("<b>x<p>".repeat(20000))
+    test.assert_eq(htmltree.count(misnested), 60001)
+    test.case("an element with more attributes than the limit is cut")
+    var attrs = ""
+    for i in 0..30000
+        attrs = attrs + " a${i}=v"
+    test.assert(exercised("<div" + attrs + ">").truncated)
+    test.case("unterminated comments and tags")
+    test.assert(not exercised("<!--".repeat(100000)).truncated)
+    test.assert(not exercised("<a ".repeat(100000)).truncated)
+    test.case("selectors against a tree cut at the depth limit find nothing below it")
+    let doc = htmlparse.parse("<div>".repeat(5000) + "<span class=x>")
+    match htmlquery.compile("div div div span.x")
+        Err(_)  => test.assert(false)
+        Ok(sel) => test.assert_eq(list.len(htmlquery.select_all(doc, 0, sel)), 0)
+    test.case("and one under it finds the element")
+    let shallow = htmlparse.parse("<div>".repeat(300) + "<span class=x>")
+    match htmlquery.compile("div div div span.x")
+        Err(_)  => test.assert(false)
+        Ok(sel) => test.assert_eq(list.len(htmlquery.select_all(shallow, 0, sel)), 1)
