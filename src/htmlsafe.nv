@@ -408,18 +408,18 @@ fn copy_children(var c: HtmlCopy, doc: htmltree.HtmlDoc, index: Int, parent: Int
                 let tag = str.slice(doc.source, tag_r.start, tag_r.end)
                 let v = verdict(allow, tag)
                 if v == 0
-                    let kept = kept_attrs(c, doc, allow, tag, attrs)
-                    let child = copy_add(c, parent, HtmlElement(tag_r, kept), n.span)
-                    copy_children(c, doc, k, child, allow)
+                    let kept = kept_attrs(var c, doc, allow, tag, attrs)
+                    let child = copy_add(var c, parent, HtmlElement(tag_r, kept), n.span)
+                    copy_children(var c, doc, k, child, allow)
                 else
                     c.removed = list.push(c.removed, k)
                     if v == 1
-                        copy_children(c, doc, k, parent, allow)
+                        copy_children(var c, doc, k, parent, allow)
             HtmlText(_, _)            =>
-                let _ = copy_add(c, parent, n.kind, n.span)
+                let _ = copy_add(var c, parent, n.kind, n.span)
             HtmlComment(_)            =>
                 if allow.keep_comments
-                    let _ = copy_add(c, parent, n.kind, n.span)
+                    let _ = copy_add(var c, parent, n.kind, n.span)
                 else
                     c.removed = list.push(c.removed, k)
             _                         =>
@@ -433,7 +433,7 @@ fn sanitized(doc: htmltree.HtmlDoc, allow: HtmlAllowList) -> HtmlCopy
         lasts: [NO_NODE], nexts: [NO_NODE], prevs: [NO_NODE],
         spans: [HtmlRange { start: 0, end: str.len(doc.source) }], extra: "", removed: [] }
     if list.len(doc.nodes) > 0
-        copy_children(c, doc, 0, 0, allow)
+        copy_children(var c, doc, 0, 0, allow)
     c
 
 // sanitize is the document with everything the policy refuses removed.

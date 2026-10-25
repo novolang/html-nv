@@ -171,9 +171,9 @@ pub fn compile(selector: Str) -> Result<HtmlSelector, HtmlSelectorError> []
     let n = str.len(selector)
     var more = true
     while more
-        skip_space(c, selector)
-        group(c, selector)!
-        skip_space(c, selector)
+        skip_space(var c, selector)
+        group(var c, selector)!
+        skip_space(var c, selector)
         if c.at == n
             more = false
         else
@@ -187,25 +187,25 @@ fn group(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
     if c.at == n or byte(s, c.at) == ','
         return fail(c.at, SelectorEmpty)
     loop
-        compound(c, s)!
-        emit(c, [OP_END_COMPOUND])
+        compound(var c, s)!
+        emit(var c, [OP_END_COMPOUND])
         let before = c.at
-        skip_space(c, s)
+        skip_space(var c, s)
         let b = byte(s, c.at)
         if c.at == n or b == ','
-            emit(c, [OP_END_GROUP])
+            emit(var c, [OP_END_GROUP])
             return Ok(())
         if b == '>' or b == '+' or b == '~'
             c.at = c.at + 1
-            skip_space(c, s)
+            skip_space(var c, s)
             if b == '>'
-                emit(c, [COMB_CHILD])
+                emit(var c, [COMB_CHILD])
             else if b == '+'
-                emit(c, [COMB_ADJACENT])
+                emit(var c, [COMB_ADJACENT])
             else
-                emit(c, [COMB_SIBLING])
+                emit(var c, [COMB_SIBLING])
         else if c.at > before
-            emit(c, [COMB_DESCENDANT])
+            emit(var c, [COMB_DESCENDANT])
         else
             return fail(c.at, SelectorUnexpected(b))
 
@@ -218,7 +218,7 @@ fn compound(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
         c.at = c.at + 1
     else if ident_byte(b0)
         let e = ident_end(s, c.at)
-        emit(c, [OP_TYPE, c.at, e - c.at])
+        emit(var c, [OP_TYPE, c.at, e - c.at])
         c.at = e
     if byte(s, c.at) == '|'
         return fail(c.at, SelectorUnsupported("|"))
@@ -229,14 +229,14 @@ fn compound(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
             if e == c.at + 1
                 return fail(c.at + 1, SelectorUnexpected(byte(s, c.at + 1)))
             if b == '#'
-                emit(c, [OP_ID, c.at + 1, e - c.at - 1])
+                emit(var c, [OP_ID, c.at + 1, e - c.at - 1])
             else
-                emit(c, [OP_CLASS, c.at + 1, e - c.at - 1])
+                emit(var c, [OP_CLASS, c.at + 1, e - c.at - 1])
             c.at = e
         else if b == '['
-            attribute(c, s)!
+            attribute(var c, s)!
         else if b == ':'
-            pseudo(c, s)!
+            pseudo(var c, s)!
         else
             if c.at == start
                 return fail(c.at, SelectorUnexpected(b))
@@ -246,7 +246,7 @@ fn compound(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
 fn attribute(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
     let open = c.at
     c.at = c.at + 1
-    skip_space(c, s)
+    skip_space(var c, s)
     let name_lo = c.at
     let name_hi = ident_end(s, c.at)
     if name_hi == name_lo
@@ -256,11 +256,11 @@ fn attribute(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
     c.at = name_hi
     if byte(s, c.at) == '|' and byte(s, c.at + 1) != '='
         return fail(c.at, SelectorUnsupported("|"))
-    skip_space(c, s)
+    skip_space(var c, s)
     let b = byte(s, c.at)
     if b == ']'
         c.at = c.at + 1
-        emit(c, [OP_ATTR, ATTR_PRESENT, name_lo, name_hi - name_lo, 0, 0])
+        emit(var c, [OP_ATTR, ATTR_PRESENT, name_lo, name_hi - name_lo, 0, 0])
         return Ok(())
     if b == -1
         return fail(open, SelectorUnclosed('['))
@@ -289,7 +289,7 @@ fn attribute(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
                 return fail(c.at, SelectorUnexpected(b))
             return fail(c.at, SelectorBadOperator(str.slice(s, c.at, e)))
         c.at = c.at + 2
-    skip_space(c, s)
+    skip_space(var c, s)
     let q = byte(s, c.at)
     var value_lo = c.at
     var value_hi = c.at
@@ -311,14 +311,14 @@ fn attribute(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
                 return fail(open, SelectorUnclosed('['))
             return fail(c.at, SelectorUnexpected(q))
         c.at = value_hi
-    skip_space(c, s)
+    skip_space(var c, s)
     let close = byte(s, c.at)
     if close != ']'
         if close == -1
             return fail(open, SelectorUnclosed('['))
         return fail(c.at, SelectorUnexpected(close))
     c.at = c.at + 1
-    emit(c, [OP_ATTR, op, name_lo, name_hi - name_lo, value_lo, value_hi - value_lo])
+    emit(var c, [OP_ATTR, op, name_lo, name_hi - name_lo, value_lo, value_hi - value_lo])
     Ok(())
 
 // A pseudo-class test, or the refusal of anything outside the subset.
@@ -346,7 +346,7 @@ fn pseudo(var c: HtmlSelCompile, s: Str) -> Result<Unit, HtmlSelectorError>
         code = PSEUDO_ROOT
     if code < 0
         return fail(colon, SelectorUnsupported(name))
-    emit(c, [OP_PSEUDO, code])
+    emit(var c, [OP_PSEUDO, code])
     c.at = e
     Ok(())
 

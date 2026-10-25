@@ -1046,9 +1046,9 @@ fn pop_to(var b: HtmlBuild, k: Int, at: Int, close_end: Int)
         else
             b.ends[index] = at
             if is_formatting(b.tags[top])
-                report(b, b.starts[index], IssueUnsupportedConstruct(b.tag_ranges[top]))
+                report(var b, b.starts[index], IssueUnsupportedConstruct(b.tag_ranges[top]))
             else if not end_optional(b.tags[top])
-                report(b, b.starts[index], IssueUnclosedElement(b.tag_ranges[top]))
+                report(var b, b.starts[index], IssueUnclosedElement(b.tag_ranges[top]))
         top = top - 1
     b.stack = b.stack[:k]
     b.tags = b.tags[:k]
@@ -1059,7 +1059,7 @@ fn pop_to(var b: HtmlBuild, k: Int, at: Int, close_end: Int)
 fn close_in_scope(var b: HtmlBuild, tag: Str, kind: Int, at: Int)
     let k = in_scope(b, tag, kind)
     if k >= 0
-        pop_to(b, k, at, at)
+        pop_to(var b, k, at, at)
 
 // The `li`, `dd` and `dt` rule: walk down the stack to the nearest
 // element named in `names`, and close it, unless a special element
@@ -1069,7 +1069,7 @@ fn close_list_item(var b: HtmlBuild, names: [Str], at: Int)
     while k >= 0
         let t = b.tags[k]
         if list.contains(names, t)
-            pop_to(b, k, at, at)
+            pop_to(var b, k, at, at)
             return
         if is_special(t) and t != "address" and t != "div" and t != "p"
             return
@@ -1078,7 +1078,7 @@ fn close_list_item(var b: HtmlBuild, names: [Str], at: Int)
 // Reports each character reference in a range that is not well-formed.
 fn check_refs(var b: HtmlBuild, lo: Int, hi: Int, in_attr: Bool)
     for at in htmlentity.decode_scan(b.source, lo, hi, in_attr).errors
-        report(b, at, IssueBadCharacterReference(HtmlRange { start: at, end: at + 1 }))
+        report(var b, at, IssueBadCharacterReference(HtmlRange { start: at, end: at + 1 }))
 
 // A start tag (section 13.2.6.4.7, in the subset this package
 // implements).
@@ -1089,48 +1089,48 @@ fn start_tag(var b: HtmlBuild, name: htmltree.HtmlRange, attrs: [htmltree.HtmlAt
         return
     let tag = str.slice(b.source, name.start, name.end)
     if tag == "template" or tag == "svg" or tag == "math"
-        report(b, lo, IssueUnsupportedConstruct(name))
+        report(var b, lo, IssueUnsupportedConstruct(name))
     if is_table_context(current_tag(b)) and not table_content(tag)
-        report(b, lo, IssueUnsupportedConstruct(name))
+        report(var b, lo, IssueUnsupportedConstruct(name))
     if tag == "a" and list.contains(b.tags, "a")
-        report(b, lo, IssueUnsupportedConstruct(name))
+        report(var b, lo, IssueUnsupportedConstruct(name))
     if tag == "li"
-        close_list_item(b, ["li"], lo)
+        close_list_item(var b, ["li"], lo)
     if tag == "dd" or tag == "dt"
-        close_list_item(b, ["dd", "dt"], lo)
+        close_list_item(var b, ["dd", "dt"], lo)
     if closes_p(tag) or tag == "li" or tag == "dd" or tag == "dt"
-        close_in_scope(b, "p", 2, lo)
+        close_in_scope(var b, "p", 2, lo)
     if is_heading(tag) and is_heading(current_tag(b)) and list.len(b.tags) > 0
-        pop_to(b, list.len(b.tags) - 1, lo, lo)
+        pop_to(var b, list.len(b.tags) - 1, lo, lo)
     if tag == "button"
-        close_in_scope(b, "button", 0, lo)
+        close_in_scope(var b, "button", 0, lo)
     if (tag == "option" or tag == "optgroup") and current_tag(b) == "option"
-        pop_to(b, list.len(b.tags) - 1, lo, lo)
+        pop_to(var b, list.len(b.tags) - 1, lo, lo)
     if tag == "td" or tag == "th" or tag == "tr" or tag == "tbody" or tag == "thead" or tag == "tfoot"
-        close_in_scope(b, "td", 3, lo)
-        close_in_scope(b, "th", 3, lo)
+        close_in_scope(var b, "td", 3, lo)
+        close_in_scope(var b, "th", 3, lo)
     if tag == "tr" or tag == "tbody" or tag == "thead" or tag == "tfoot"
-        close_in_scope(b, "tr", 3, lo)
+        close_in_scope(var b, "tr", 3, lo)
     if tag == "tbody" or tag == "thead" or tag == "tfoot"
-        close_in_scope(b, "tbody", 3, lo)
-        close_in_scope(b, "thead", 3, lo)
-        close_in_scope(b, "tfoot", 3, lo)
+        close_in_scope(var b, "tbody", 3, lo)
+        close_in_scope(var b, "thead", 3, lo)
+        close_in_scope(var b, "tfoot", 3, lo)
     let childless = htmltree.childless(tag)
     if not childless and list.len(b.stack) >= b.limits.max_depth
         b.truncated = true
         return
-    let index = add(b, HtmlElement(name, attrs), lo, hi)
+    let index = add(var b, HtmlElement(name, attrs), lo, hi)
     if index < 0
         return
     b.begun = true
     for a in attrs
         if a.needs_decoding
-            check_refs(b, a.value.start, a.value.end, true)
-    note_id(b, attrs)
+            check_refs(var b, a.value.start, a.value.end, true)
+    note_id(var b, attrs)
     if childless
         return
     if self_closing
-        report(b, lo, IssueSelfClosingNonVoid(name))
+        report(var b, lo, IssueSelfClosingNonVoid(name))
     b.stack = list.push(b.stack, index)
     b.tags = list.push(b.tags, tag)
     b.tag_ranges = list.push(b.tag_ranges, name)
@@ -1144,7 +1144,7 @@ fn note_id(var b: HtmlBuild, attrs: [htmltree.HtmlAttr])
         if str.slice(b.source, a.name.start, a.name.end) == "id"
             let id = htmlentity.decode_scan(b.source, a.value.start, a.value.end, true).text
             if list.contains(b.ids, id)
-                report(b, a.value.start, IssueDuplicateId(a.value))
+                report(var b, a.value.start, IssueDuplicateId(a.value))
             else
                 b.ids = list.push(b.ids, id)
             return
@@ -1190,13 +1190,13 @@ fn end_scope(tag: Str) -> Int
 fn end_tag(var b: HtmlBuild, name: htmltree.HtmlRange, lo: Int, hi: Int)
     let tag = str.slice(b.source, name.start, name.end)
     if htmltree.childless(tag)
-        report(b, lo, IssueStrayEndTag(name))
+        report(var b, lo, IssueStrayEndTag(name))
         if tag == "br"
-            let _ = add(b, HtmlElement(name, []), lo, hi)
+            let _ = add(var b, HtmlElement(name, []), lo, hi)
         return
     if tag == "p" and in_scope(b, "p", 2) < 0
-        report(b, lo, IssueStrayEndTag(name))
-        let _ = add(b, HtmlElement(name, []), lo, hi)
+        report(var b, lo, IssueStrayEndTag(name))
+        let _ = add(var b, HtmlElement(name, []), lo, hi)
         return
     if is_heading(tag)
         var k = list.len(b.tags) - 1
@@ -1205,36 +1205,36 @@ fn end_tag(var b: HtmlBuild, name: htmltree.HtmlRange, lo: Int, hi: Int)
                 k = 0
             k = k - 1
         if k < 0
-            report(b, lo, IssueStrayEndTag(name))
+            report(var b, lo, IssueStrayEndTag(name))
             return
-        pop_to(b, k, lo, hi)
+        pop_to(var b, k, lo, hi)
         return
     if is_formatting(tag)
         let k = last_index(b.tags, tag)
         if k < 0
-            report(b, lo, IssueStrayEndTag(name))
+            report(var b, lo, IssueStrayEndTag(name))
             return
         if k != list.len(b.tags) - 1
-            report(b, lo, IssueUnsupportedConstruct(name))
-        pop_to(b, k, lo, hi)
+            report(var b, lo, IssueUnsupportedConstruct(name))
+        pop_to(var b, k, lo, hi)
         return
     if tag == "p" or tag == "li" or tag == "dd" or tag == "dt" or closed_by_scope(tag)
         let k = in_scope(b, tag, end_scope(tag))
         if k < 0
-            report(b, lo, IssueStrayEndTag(name))
+            report(var b, lo, IssueStrayEndTag(name))
             return
-        pop_to(b, k, lo, hi)
+        pop_to(var b, k, lo, hi)
         return
     var k = list.len(b.tags) - 1
     while k >= 0
         let t = b.tags[k]
         if t == tag
-            pop_to(b, k, lo, hi)
+            pop_to(var b, k, lo, hi)
             return
         if is_special(t)
             k = 0
         k = k - 1
-    report(b, lo, IssueStrayEndTag(name))
+    report(var b, lo, IssueStrayEndTag(name))
 
 // The last position of a string in a list, or -1.
 fn last_index(xs: [Str], x: Str) -> Int
@@ -1273,12 +1273,12 @@ fn text(var b: HtmlBuild, lo0: Int, hi: Int, refs: Bool)
         return
     let r = HtmlRange { start: lo, end: hi }
     if is_table_context(current_tag(b)) and not blank(b.source, lo, hi)
-        report(b, lo, IssueUnsupportedConstruct(r))
+        report(var b, lo, IssueUnsupportedConstruct(r))
     if refs
-        check_refs(b, lo, hi, false)
+        check_refs(var b, lo, hi, false)
     if not blank(b.source, lo, hi)
         b.begun = true
-    let _ = add(b, HtmlText(r, refs), lo, hi)
+    let _ = add(var b, HtmlText(r, refs), lo, hi)
 
 // Builds the tree from a tokenizer's tokens.
 fn build(t0: HtmlTokenizer, limits: HtmlLimits, context: Str) -> htmltree.HtmlDoc
@@ -1301,17 +1301,17 @@ fn build(t0: HtmlTokenizer, limits: HtmlLimits, context: Str) -> htmltree.HtmlDo
                 if not token_is_text(step.token.kind)
                     b.skip_lf = false
                 match step.token.kind
-                    TokenStartTag(name, attrs, closing) => start_tag(b, name, attrs, closing, lo, hi)
-                    TokenEndTag(name)                   => end_tag(b, name, lo, hi)
-                    TokenCharacters(r, refs)            => text(b, r.start, r.end, refs)
+                    TokenStartTag(name, attrs, closing) => start_tag(var b, name, attrs, closing, lo, hi)
+                    TokenEndTag(name)                   => end_tag(var b, name, lo, hi)
+                    TokenCharacters(r, refs)            => text(var b, r.start, r.end, refs)
                     TokenComment(r)                     =>
-                        let _ = add(b, HtmlComment(r), lo, hi)
+                        let _ = add(var b, HtmlComment(r), lo, hi)
                     TokenDoctype(name)                  =>
                         if not b.begun and not b.doctyped and context == ""
-                            let _ = add(b, HtmlDoctype(name), lo, hi)
+                            let _ = add(var b, HtmlDoctype(name), lo, hi)
                             b.doctyped = true
                     TokenEof                            => ()
-    close_all(b)
+    close_all(var b)
     arena(b)
 
 // Closes every element still open at the end of the source, and
@@ -1322,7 +1322,7 @@ fn close_all(var b: HtmlBuild)
         let index = b.stack[k]
         b.ends[index] = n
         if not end_optional(b.tags[k])
-            report(b, b.starts[index], IssueUnclosedElement(b.tag_ranges[k]))
+            report(var b, b.starts[index], IssueUnclosedElement(b.tag_ranges[k]))
     b.stack = []
     b.tags = []
     b.tag_ranges = []

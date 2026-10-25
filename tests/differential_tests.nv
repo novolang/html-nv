@@ -12,6 +12,7 @@ use std.test
 use std.str
 use htmlparse
 use htmlentity
+use htmltree
 
 // The tokens of a document, in the form Python's are written.
 fn tokens_text(source: Str) -> Str
